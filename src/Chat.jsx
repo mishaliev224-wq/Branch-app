@@ -639,7 +639,8 @@ export default function Chat() {
       gain.connect(ctx.destination)
       const vol = (soundVolume / 100) * 0.15
       if (type === 'message-send') {
-        osc.stop()
+        osc.disconnect()
+        gain.disconnect()
         ctx.close()
         const a = new Audio('/sound_send.wav')
         a.volume = Math.min(soundVolume / 100, 1)

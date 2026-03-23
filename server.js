@@ -106,6 +106,9 @@ const uploadsDir = join(__dirname, 'uploads');
 mkdirSync(uploadsDir, { recursive: true });
 app.use('/uploads', express.static(uploadsDir));
 
+// Serve public assets (sounds, etc.)
+app.use(express.static(join(__dirname, 'public')));
+
 // Serve built frontend in production
 const distDir = join(__dirname, 'dist');
 if (existsSync(distDir)) {
