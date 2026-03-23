@@ -1046,7 +1046,14 @@ export default function Chat() {
     return pc
   }
 
-  const playVoiceSound = (src, volume = 1) => { const a = new Audio(src); a.volume = Math.min(volume, 1); a.play().catch(() => {}) }
+  const playVoiceSound = (src, volume = 1) => {
+    const a = new Audio(src)
+    a.volume = Math.min(volume, 1)
+    a.addEventListener('canplaythrough', () => {
+      a.play().catch(e => console.error('Sound error:', src, e))
+    }, { once: true })
+    a.load()
+  }
 
   const joinVoiceChannel = async (channel) => {
     if (voiceChannel?.id === channel.id) return
