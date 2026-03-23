@@ -1,184 +1,80 @@
 {
   "users": [
     {
-      "id": "101",
-      "username": "Foteack",
-      "email": "test@test.com",
-      "passwordHash": "$2a$10$ZtDMy.k0pYI1Q67LcBlLbekhC9PF.lt.bT7M/rt5CfQSmTzpIfOqi",
-      "avatarColor": "#f04747",
-      "status": "online",
-      "createdAt": "2026-03-12T10:46:28.867Z",
-      "bio": "Gaming enthusiast and Branch user!",
-      "tag": "9101",
-      "blockedUsers": []
-    },
-    {
-      "id": "103",
-      "username": "foteack",
-      "email": "mishaliev224@gmail.com",
-      "passwordHash": "$2a$10$ZtDMy.k0pYI1Q67LcBlLbekhC9PF.lt.bT7M/rt5CfQSmTzpIfOqi",
-      "avatarColor": "#f04747",
-      "status": "online",
-      "createdAt": "2026-03-12T10:48:37.301Z",
-      "tag": "3866",
-      "bio": "Муха гей"
-    },
-    {
-      "id": "107",
-      "username": "TestBuddy",
-      "email": "buddy@test.com",
-      "passwordHash": "$2a$10$pZCBjucu/tbP4oDEktgz9u8dIS1pbp.XzSpsjj9dnCnsXWBsQePpK",
-      "avatarColor": "#f04747",
-      "tag": "7763",
+      "id": "2",
+      "username": "TestUser",
+      "email": "test@mail.com",
+      "passwordHash": "$2a$10$PTS.1RaNs5OUUphzmTXRF.bvUCQo.n/B2TrEbiCTdvaRku6PBBvVu",
+      "avatarColor": "#ff6b9d",
+      "tag": "5614",
       "status": "online",
       "bio": "",
-      "createdAt": "2026-03-14T15:58:34.683Z"
+      "createdAt": "2026-03-22T19:19:44.138Z",
+      "verified": true
     },
     {
-      "id": "121",
-      "username": "Leonid",
-      "email": "skweezy224@gmail.com",
-      "passwordHash": "$2a$10$rpmRUBVyUPEIhfcqhlhz3ut9RQaXbdVGi5KJ5zsj6LAJfjA3jwJ7O",
-      "avatarColor": "#ec4899",
-      "tag": "9203",
-      "status": "dnd",
-      "bio": "да это я....",
-      "createdAt": "2026-03-16T07:55:42.535Z",
-      "blockedUsers": []
-    },
-    {
-      "id": "158",
-      "username": "testuser",
-      "email": "test2@test.com",
-      "passwordHash": "$2a$10$0JDK2E4Gs9Pq1XUcZP72fuWFAY/UW6aB.3RbjDwiUDr31uhim1eB.",
+      "id": "3",
+      "username": "NewUser",
+      "email": "new@mail.com",
+      "passwordHash": "$2a$10$67/74zQlFnaFyn/o2cAKsu1O060X1PzbAn3mqWk4yX7E5QQI89lgu",
       "avatarColor": "#7c5cfc",
-      "tag": "1641",
+      "tag": "2185",
       "status": "online",
       "bio": "",
-      "createdAt": "2026-03-17T09:26:38.895Z"
+      "createdAt": "2026-03-22T19:29:36.232Z",
+      "verified": true
     },
     {
-      "id": "271",
-      "username": "fff",
-      "email": "mishaliev@gmail.com",
-      "passwordHash": "$2a$10$s17S9XQmVVv6ves499HK0OePXe3n48ob8wJx5OD4TDcQujllWp6KO",
-      "avatarColor": "#06b6d4",
-      "tag": "5367",
+      "id": "4",
+      "username": "User2",
+      "email": "user2@mail.com",
+      "passwordHash": "$2a$10$j30GrPIYxPTuL5LMJwfc5.83l3.Yu2YnAhkIxq6Dok.c3xB9.Odma",
+      "avatarColor": "#f04747",
+      "tag": "5718",
       "status": "online",
       "bio": "",
-      "createdAt": "2026-03-21T19:21:53.859Z"
+      "createdAt": "2026-03-22T19:30:13.419Z",
+      "verified": true
+    },
+    {
+      "id": "5",
+      "username": "Foteack",
+      "email": "mishaliev224@gmail.com",
+      "passwordHash": "$2a$10$YGlWtsWmuewfKp8U4/9P1enLvVo5/u0/H.KbtaVhrh8aeUgbE52Je",
+      "avatarColor": "#00d4aa",
+      "tag": "9999",
+      "status": "online",
+      "bio": "",
+      "createdAt": "2026-03-22T19:34:14.352Z",
+      "verified": true
     }
   ],
   "servers": [
     {
       "id": "s1",
-      "name": "Branch HQ",
-      "iconText": "BH",
-      "ownerId": "system",
-      "createdAt": "2026-03-12T10:43:27.822Z"
-    },
-    {
-      "id": "s2",
-      "name": "Gaming Zone",
-      "iconText": "GZ",
-      "ownerId": "system",
-      "createdAt": "2026-03-12T10:43:27.822Z"
-    },
-    {
-      "id": "s3",
-      "name": "Music Lounge",
-      "iconText": "ML",
-      "ownerId": "system",
-      "createdAt": "2026-03-12T10:43:27.822Z"
-    },
-    {
-      "id": "s109",
-      "name": "klkjl",
-      "iconText": "K",
-      "ownerId": "103",
-      "createdAt": "2026-03-14T16:08:59.072Z"
-    },
-    {
-      "id": "s247",
-      "name": "Поебота",
-      "iconText": "П",
-      "ownerId": "103",
-      "createdAt": "2026-03-18T09:58:30.637Z"
+      "name": "Буст",
+      "ownerId": "5",
+      "icon": null,
+      "createdAt": "2026-03-23T00:00:00.000Z",
+      "adminPermissions": {
+        "deleteMessages": false,
+        "deleteChannels": false,
+        "createChannels": false,
+        "kickMembers": false,
+        "manageRoles": false,
+        "bypassSlowmode": false
+      },
+      "iconText": "Б",
+      "verified": true
     }
   ],
   "channels": [
     {
       "id": "c1",
       "serverId": "s1",
-      "name": "general",
-      "createdAt": "2026-03-12T10:43:27.822Z"
-    },
-    {
-      "id": "c2",
-      "serverId": "s1",
-      "name": "announcements",
-      "createdAt": "2026-03-12T10:43:27.822Z"
-    },
-    {
-      "id": "c3",
-      "serverId": "s1",
-      "name": "off-topic",
-      "createdAt": "2026-03-12T10:43:27.822Z"
-    },
-    {
-      "id": "c300",
-      "serverId": "s1",
-      "name": "Voice Chat",
-      "type": "voice",
-      "createdAt": "2026-03-20T10:00:00.000Z"
-    },
-    {
-      "id": "c4",
-      "serverId": "s2",
-      "name": "general",
-      "createdAt": "2026-03-12T10:43:27.822Z"
-    },
-    {
-      "id": "c5",
-      "serverId": "s2",
-      "name": "fps-games",
-      "createdAt": "2026-03-12T10:43:27.822Z"
-    },
-    {
-      "id": "c6",
-      "serverId": "s2",
-      "name": "mmorpg",
-      "createdAt": "2026-03-12T10:43:27.822Z"
-    },
-    {
-      "id": "c7",
-      "serverId": "s3",
-      "name": "general",
-      "createdAt": "2026-03-12T10:43:27.822Z"
-    },
-    {
-      "id": "c8",
-      "serverId": "s3",
-      "name": "playlists",
-      "createdAt": "2026-03-12T10:43:27.822Z"
-    },
-    {
-      "id": "c110",
-      "serverId": "s109",
-      "name": "general",
-      "createdAt": "2026-03-14T16:08:59.072Z"
-    },
-    {
-      "id": "c111",
-      "serverId": "s109",
-      "name": "jlklk",
-      "createdAt": "2026-03-14T16:09:17.738Z"
-    },
-    {
-      "id": "c248",
-      "serverId": "s247",
-      "name": "чатик-основной",
-      "createdAt": "2026-03-18T09:58:30.638Z",
+      "name": "главные-новости",
+      "type": "text",
+      "createdAt": "2026-03-23T00:00:00.000Z",
       "isPrivate": false,
       "allowedUsers": [],
       "permissions": {
@@ -198,1271 +94,81 @@
       "slowmode": 0
     },
     {
-      "id": "c251",
-      "serverId": "s247",
-      "name": "ооо",
-      "type": "voice",
-      "createdAt": "2026-03-18T15:32:26.072Z"
+      "id": "c2",
+      "serverId": "s1",
+      "name": "последние-обновления",
+      "type": "text",
+      "createdAt": "2026-03-23T00:00:00.000Z",
+      "isPrivate": false,
+      "allowedUsers": [],
+      "permissions": {
+        "user": {
+          "invite": true,
+          "sendMessages": true,
+          "sendMedia": true,
+          "viewChannel": true
+        },
+        "admin": {
+          "invite": true,
+          "sendMessages": true,
+          "sendMedia": true,
+          "viewChannel": true
+        }
+      },
+      "slowmode": 0
+    },
+    {
+      "id": "c3",
+      "serverId": "s1",
+      "name": "general",
+      "type": "text",
+      "createdAt": "2026-03-23T00:00:00.000Z"
     }
   ],
   "members": [
     {
       "serverId": "s1",
-      "userId": "101",
-      "joinedAt": "2026-03-12T10:46:28.867Z"
-    },
-    {
-      "serverId": "s2",
-      "userId": "101",
-      "joinedAt": "2026-03-12T10:46:28.867Z"
-    },
-    {
-      "serverId": "s3",
-      "userId": "101",
-      "joinedAt": "2026-03-12T10:46:28.867Z"
+      "userId": "5",
+      "role": "owner",
+      "joinedAt": "2026-03-23T00:00:00.000Z"
     },
     {
       "serverId": "s1",
-      "userId": "107",
-      "joinedAt": "2026-03-14T15:58:34.683Z"
-    },
-    {
-      "serverId": "s2",
-      "userId": "107",
-      "joinedAt": "2026-03-14T15:58:34.683Z"
-    },
-    {
-      "serverId": "s3",
-      "userId": "107",
-      "joinedAt": "2026-03-14T15:58:34.683Z"
+      "userId": "2",
+      "role": "user",
+      "joinedAt": "2026-03-23T00:00:00.000Z"
     },
     {
       "serverId": "s1",
-      "userId": "158",
-      "joinedAt": "2026-03-17T09:26:38.895Z"
-    },
-    {
-      "serverId": "s2",
-      "userId": "158",
-      "joinedAt": "2026-03-17T09:26:38.895Z"
-    },
-    {
-      "serverId": "s3",
-      "userId": "158",
-      "joinedAt": "2026-03-17T09:26:38.895Z"
-    },
-    {
-      "serverId": "s247",
-      "userId": "103",
-      "joinedAt": "2026-03-18T09:58:30.637Z"
-    },
-    {
-      "serverId": "s247",
-      "userId": "121",
-      "joinedAt": "2026-03-18T15:34:40.525Z"
-    },
-    {
-      "serverId": "s247",
-      "userId": "101",
-      "joinedAt": "2026-03-21T19:47:43.053Z"
+      "userId": "3",
+      "role": "user",
+      "joinedAt": "2026-03-23T00:00:00.000Z"
     },
     {
       "serverId": "s1",
-      "userId": "121",
-      "joinedAt": "2026-03-21T20:04:40.572Z"
+      "userId": "4",
+      "role": "user",
+      "joinedAt": "2026-03-23T00:00:00.000Z"
     }
   ],
   "messages": [
     {
-      "id": "m102",
+      "id": "msg6",
       "channelId": "c1",
-      "userId": "101",
-      "content": "Hello Branch! This is my first message 🎉",
-      "createdAt": "2026-03-12T10:46:53.475Z",
-      "pinned": false
-    },
-    {
-      "id": "m105",
-      "channelId": "c1",
-      "userId": "103",
-      "content": "How are you?",
-      "createdAt": "2026-03-14T08:21:05.444Z",
-      "pinned": false
-    },
-    {
-      "id": "m112",
-      "channelId": "c111",
-      "userId": "103",
-      "content": "kl;",
-      "createdAt": "2026-03-14T16:09:20.398Z"
-    },
-    {
-      "id": "m114",
-      "channelId": "c1",
-      "userId": "107",
-      "content": "",
-      "createdAt": "2026-03-15T14:50:12.356Z",
-      "attachment": {
-        "url": "/uploads/1773586212267-247601.mp3",
-        "fileName": "Ana El Ghaltan HQ Audio Instrumental (online-audio-converter.com).mp3",
-        "fileSize": 8117112,
-        "mimeType": "audio/mpeg",
-        "fileType": "audio"
-      }
-    },
-    {
-      "id": "m115",
-      "channelId": "c1",
-      "userId": "107",
-      "content": "",
-      "createdAt": "2026-03-15T14:50:33.855Z",
-      "attachment": {
-        "url": "/uploads/1773586233852-822621.jpg",
-        "fileName": "images (3).jpg",
-        "fileSize": 5574,
-        "mimeType": "image/jpeg",
-        "fileType": "file"
-      }
-    },
-    {
-      "id": "m116",
-      "channelId": "c1",
-      "userId": "107",
-      "content": "",
-      "createdAt": "2026-03-15T14:50:45.688Z",
-      "attachment": {
-        "url": "/uploads/1773586245685-144890.jpg",
-        "fileName": "images (3).jpg",
-        "fileSize": 5574,
-        "mimeType": "image/jpeg",
-        "fileType": "image"
-      }
-    },
-    {
-      "id": "m117",
-      "channelId": "c1",
-      "userId": "107",
-      "content": "",
-      "createdAt": "2026-03-15T14:51:46.628Z",
-      "attachment": {
-        "url": "/uploads/1773586306625-743329.jpg",
-        "fileName": "98f34bbb6887eaa99b1fc01bb256ac3e.jpg",
-        "fileSize": 62275,
-        "mimeType": "image/jpeg",
-        "fileType": "image"
-      }
-    },
-    {
-      "id": "m118",
-      "channelId": "c1",
-      "userId": "107",
-      "content": "вот",
-      "createdAt": "2026-03-15T15:00:25.539Z",
-      "attachment": {
-        "url": "/uploads/1773586825500-325262.mp3",
-        "fileName": "Project_Arabian.mp3",
-        "fileSize": 4485176,
-        "mimeType": "audio/mpeg",
-        "fileType": "audio"
-      }
-    },
-    {
-      "id": "m134",
-      "channelId": "c1",
-      "userId": "121",
-      "content": "Leonid покинул(а) сервер",
       "type": "system",
-      "createdAt": "2026-03-16T08:32:57.717Z",
-      "user": {
-        "id": "121",
-        "username": "Leonid",
-        "avatarColor": "#ec4899",
-        "tag": "9203"
-      }
+      "content": "Foteack изменил(а) название канала с «news» на «главные-новости»",
+      "createdAt": "2026-03-22T19:46:24.556Z"
     },
     {
-      "id": "m135",
-      "channelId": "c7",
-      "userId": "103",
-      "content": "foteack покинул(а) сервер",
-      "type": "system",
-      "createdAt": "2026-03-16T08:34:42.742Z",
-      "user": {
-        "id": "103",
-        "username": "foteack",
-        "avatarColor": "#f04747",
-        "tag": "3866"
-      }
-    },
-    {
-      "id": "m136",
-      "channelId": "c4",
-      "userId": "103",
-      "content": "foteack покинул(а) сервер",
-      "type": "system",
-      "createdAt": "2026-03-16T08:34:49.382Z",
-      "user": {
-        "id": "103",
-        "username": "foteack",
-        "avatarColor": "#f04747",
-        "tag": "3866"
-      }
-    },
-    {
-      "id": "m137",
-      "channelId": "c4",
-      "userId": "121",
-      "content": "Leonid покинул(а) сервер",
-      "type": "system",
-      "createdAt": "2026-03-16T08:38:18.398Z",
-      "user": {
-        "id": "121",
-        "username": "Leonid",
-        "avatarColor": "#ec4899",
-        "tag": "9203"
-      }
-    },
-    {
-      "id": "m138",
-      "channelId": "c7",
-      "userId": "121",
-      "content": "Leonid покинул(а) сервер",
-      "type": "system",
-      "createdAt": "2026-03-16T08:38:22.333Z",
-      "user": {
-        "id": "121",
-        "username": "Leonid",
-        "avatarColor": "#ec4899",
-        "tag": "9203"
-      }
-    },
-    {
-      "id": "m142",
-      "channelId": "c1",
-      "userId": "121",
-      "content": "Leonid присоединился(-ась) к серверу",
-      "type": "system",
-      "createdAt": "2026-03-16T08:44:37.521Z",
-      "user": {
-        "id": "121",
-        "username": "Leonid",
-        "avatarColor": "#ec4899",
-        "tag": "9203"
-      }
-    },
-    {
-      "id": "m145",
-      "channelId": "c1",
-      "userId": "103",
-      "content": "Тестовое сообщение для контекстного",
-      "createdAt": "2026-03-16T09:54:41.537Z",
-      "pinned": false,
-      "editedAt": "2026-03-16T09:57:42.314Z",
-      "pinnedFor": []
-    },
-    {
-      "id": "m146",
-      "channelId": "c1",
-      "userId": "103",
-      "createdAt": "2026-03-16T10:06:48.119Z",
-      "deleted": true,
-      "deletedAt": "2026-03-16T10:07:27.758Z"
-    },
-    {
-      "id": "m149",
-      "channelId": "c1",
-      "userId": "103",
-      "content": "foteack закрепил(а) сообщение",
-      "type": "system",
-      "createdAt": "2026-03-16T12:09:25.024Z",
-      "user": {
-        "id": "103",
-        "username": "foteack",
-        "avatarColor": "#f04747",
-        "tag": "3866"
-      }
-    },
-    {
-      "id": "m150",
-      "channelId": "c1",
-      "userId": "103",
-      "content": "foteack открепил(а) сообщение",
-      "type": "system",
-      "createdAt": "2026-03-16T12:09:38.872Z",
-      "user": {
-        "id": "103",
-        "username": "foteack",
-        "avatarColor": "#f04747",
-        "tag": "3866"
-      }
-    },
-    {
-      "id": "m151",
-      "channelId": "c1",
-      "userId": "103",
-      "content": "прао",
-      "createdAt": "2026-03-16T12:09:52.993Z",
-      "pinned": false,
-      "pinnedFor": []
-    },
-    {
-      "id": "m152",
-      "channelId": "c1",
-      "userId": "103",
-      "content": "foteack закрепил(а) сообщение",
-      "type": "system",
-      "createdAt": "2026-03-16T12:12:20.984Z",
-      "user": {
-        "id": "103",
-        "username": "foteack",
-        "avatarColor": "#f04747",
-        "tag": "3866"
-      }
-    },
-    {
-      "id": "m153",
-      "channelId": "c1",
-      "userId": "103",
-      "content": "foteack открепил(а) сообщение",
-      "type": "system",
-      "createdAt": "2026-03-16T12:12:27.236Z",
-      "user": {
-        "id": "103",
-        "username": "foteack",
-        "avatarColor": "#f04747",
-        "tag": "3866"
-      }
-    },
-    {
-      "id": "m154",
-      "channelId": "c1",
-      "userId": "121",
-      "content": "Leonid открепил(а) сообщение",
-      "type": "system",
-      "createdAt": "2026-03-16T13:29:05.489Z",
-      "user": {
-        "id": "121",
-        "username": "Leonid",
-        "avatarColor": "#ec4899",
-        "tag": "9203"
-      }
-    },
-    {
-      "id": "m155",
-      "channelId": "c1",
-      "userId": "121",
-      "content": "Leonid открепил(а) сообщение",
-      "type": "system",
-      "createdAt": "2026-03-16T13:29:10.463Z",
-      "user": {
-        "id": "121",
-        "username": "Leonid",
-        "avatarColor": "#ec4899",
-        "tag": "9203"
-      }
-    },
-    {
-      "id": "m156",
-      "channelId": "c1",
-      "userId": "121",
-      "content": "",
-      "createdAt": "2026-03-16T13:29:35.051Z",
-      "attachment": {
-        "url": "/uploads/1773667775038-598144.mp4",
-        "fileName": "counter-strike-2-2026-02-26-18-45-51_HOGopEKz.mp4",
-        "fileSize": 1578713,
-        "mimeType": "video/mp4",
-        "fileType": "video"
-      },
-      "pinned": true
-    },
-    {
-      "id": "m220",
-      "channelId": "c1",
-      "userId": "121",
-      "content": "Leonid покинул(а) сервер",
-      "type": "system",
-      "createdAt": "2026-03-17T15:38:40.130Z",
-      "user": {
-        "id": "121",
-        "username": "Leonid",
-        "avatarColor": "#ec4899",
-        "tag": "9203"
-      }
-    },
-    {
-      "id": "m224",
-      "channelId": "c1",
-      "userId": "121",
-      "content": "Leonid присоединился(-ась) к серверу",
-      "type": "system",
-      "createdAt": "2026-03-17T15:40:36.044Z",
-      "user": {
-        "id": "121",
-        "username": "Leonid",
-        "avatarColor": "#ec4899",
-        "tag": "9203"
-      }
-    },
-    {
-      "id": "m225",
-      "channelId": "c1",
-      "userId": "121",
-      "content": "Leonid покинул(а) сервер",
-      "type": "system",
-      "createdAt": "2026-03-17T15:40:42.530Z",
-      "user": {
-        "id": "121",
-        "username": "Leonid",
-        "avatarColor": "#ec4899",
-        "tag": "9203"
-      }
-    },
-    {
-      "id": "m232",
-      "channelId": "c1",
-      "userId": "103",
-      "content": "foteack покинул(а) сервер",
-      "type": "system",
-      "createdAt": "2026-03-18T08:18:23.370Z",
-      "user": {
-        "id": "103",
-        "username": "foteack",
-        "avatarColor": "#f04747",
-        "tag": "3866"
-      }
-    },
-    {
-      "id": "m240",
-      "channelId": "c1",
-      "userId": "121",
-      "content": "Leonid присоединился(-ась) к серверу",
-      "type": "system",
-      "createdAt": "2026-03-18T09:41:08.882Z",
-      "user": {
-        "id": "121",
-        "username": "Leonid",
-        "avatarColor": "#ec4899",
-        "tag": "9203"
-      }
-    },
-    {
-      "id": "m241",
-      "channelId": "c1",
-      "userId": "121",
-      "content": "Leonid покинул(а) сервер",
-      "type": "system",
-      "createdAt": "2026-03-18T09:41:16.224Z",
-      "user": {
-        "id": "121",
-        "username": "Leonid",
-        "avatarColor": "#ec4899",
-        "tag": "9203"
-      }
-    },
-    {
-      "id": "m242",
-      "channelId": "c1",
-      "userId": "103",
-      "content": "foteack присоединился(-ась) к серверу",
-      "type": "system",
-      "createdAt": "2026-03-18T09:56:48.404Z",
-      "user": {
-        "id": "103",
-        "username": "foteack",
-        "avatarColor": "#f04747",
-        "tag": "3866"
-      }
-    },
-    {
-      "id": "m243",
-      "channelId": "c1",
-      "userId": "103",
-      "content": "foteack закрепил(а) сообщение",
-      "type": "system",
-      "createdAt": "2026-03-18T09:56:55.251Z",
-      "user": {
-        "id": "103",
-        "username": "foteack",
-        "avatarColor": "#f04747",
-        "tag": "3866"
-      }
-    },
-    {
-      "id": "m244",
-      "channelId": "c1",
-      "userId": "103",
-      "content": "foteack покинул(а) сервер",
-      "type": "system",
-      "createdAt": "2026-03-18T09:57:21.756Z",
-      "user": {
-        "id": "103",
-        "username": "foteack",
-        "avatarColor": "#f04747",
-        "tag": "3866"
-      }
-    },
-    {
-      "id": "msg249",
-      "channelId": "c248",
-      "type": "system",
-      "content": "foteack изменил(а) название канала с «general» на «чатик-основной»",
-      "createdAt": "2026-03-18T09:58:45.368Z"
-    },
-    {
-      "id": "m253",
-      "channelId": "c248",
-      "userId": "121",
-      "content": "Leonid присоединился(-ась) к серверу",
-      "type": "system",
-      "createdAt": "2026-03-18T15:34:40.526Z",
-      "user": {
-        "id": "121",
-        "username": "Leonid",
-        "avatarColor": "#ec4899",
-        "tag": "9203"
-      }
-    },
-    {
-      "id": "m254",
+      "id": "msg7",
       "channelId": "c2",
-      "userId": "103",
-      "content": "Notification test 1!",
-      "createdAt": "2026-03-21T14:07:28.995Z"
-    },
-    {
-      "id": "m255",
-      "channelId": "c2",
-      "userId": "103",
-      "content": "Notification test 2!",
-      "createdAt": "2026-03-21T14:07:29.495Z"
-    },
-    {
-      "id": "m256",
-      "channelId": "c3",
-      "userId": "103",
-      "content": "Off-topic notification!",
-      "createdAt": "2026-03-21T14:07:29.998Z"
-    },
-    {
-      "id": "m257",
-      "channelId": "c2",
-      "userId": "103",
-      "content": "Notification 1!",
-      "createdAt": "2026-03-21T14:08:02.964Z"
-    },
-    {
-      "id": "m258",
-      "channelId": "c2",
-      "userId": "103",
-      "content": "Notification 2!",
-      "createdAt": "2026-03-21T14:08:02.966Z"
-    },
-    {
-      "id": "m259",
-      "channelId": "c2",
-      "userId": "103",
-      "content": "Notification 3!",
-      "createdAt": "2026-03-21T14:08:02.967Z"
-    },
-    {
-      "id": "m260",
-      "channelId": "c3",
-      "userId": "103",
-      "content": "Off-topic msg!",
-      "createdAt": "2026-03-21T14:08:03.265Z"
-    },
-    {
-      "id": "m261",
-      "channelId": "c2",
-      "userId": "103",
-      "content": "Badge test!",
-      "createdAt": "2026-03-21T14:10:24.837Z"
-    },
-    {
-      "id": "m262",
-      "channelId": "c3",
-      "userId": "103",
-      "content": "Badge test 2!",
-      "createdAt": "2026-03-21T14:10:24.838Z"
-    },
-    {
-      "id": "m263",
-      "channelId": "c2",
-      "userId": "103",
-      "content": "Test mark as read!",
-      "createdAt": "2026-03-21T14:12:53.717Z"
-    },
-    {
-      "id": "m264",
-      "channelId": "c2",
-      "userId": "103",
-      "content": "Ctx menu test!",
-      "createdAt": "2026-03-21T14:13:19.610Z"
-    },
-    {
-      "id": "m272",
-      "channelId": "c1",
-      "userId": "271",
-      "content": "fff покинул(а) сервер",
       "type": "system",
-      "createdAt": "2026-03-21T19:22:02.604Z",
-      "user": {
-        "id": "271",
-        "username": "fff",
-        "avatarColor": "#06b6d4",
-        "tag": "5367"
-      }
-    },
-    {
-      "id": "m273",
-      "channelId": "c4",
-      "userId": "271",
-      "content": "fff покинул(а) сервер",
-      "type": "system",
-      "createdAt": "2026-03-21T19:22:06.366Z",
-      "user": {
-        "id": "271",
-        "username": "fff",
-        "avatarColor": "#06b6d4",
-        "tag": "5367"
-      }
-    },
-    {
-      "id": "m274",
-      "channelId": "c7",
-      "userId": "271",
-      "content": "fff покинул(а) сервер",
-      "type": "system",
-      "createdAt": "2026-03-21T19:22:12.051Z",
-      "user": {
-        "id": "271",
-        "username": "fff",
-        "avatarColor": "#06b6d4",
-        "tag": "5367"
-      }
-    },
-    {
-      "id": "m283",
-      "channelId": "c248",
-      "userId": "101",
-      "content": "Foteack присоединился(-ась) к серверу",
-      "type": "system",
-      "createdAt": "2026-03-21T19:47:43.054Z",
-      "user": {
-        "id": "101",
-        "username": "Foteack",
-        "avatarColor": "#f04747",
-        "tag": "9101"
-      }
-    },
-    {
-      "id": "m285",
-      "channelId": "c1",
-      "userId": "121",
-      "content": "Leonid присоединился(-ась) к серверу",
-      "type": "system",
-      "createdAt": "2026-03-21T20:04:40.573Z",
-      "user": {
-        "id": "121",
-        "username": "Leonid",
-        "avatarColor": "#ec4899",
-        "tag": "9203"
-      }
-    },
-    {
-      "id": "m300",
-      "channelId": "c1",
-      "userId": "101",
-      "content": "привет",
-      "createdAt": "2026-03-22T13:57:33.802Z",
-      "replyToId": "m145"
-    },
-    {
-      "id": "m301",
-      "channelId": "c1",
-      "userId": "101",
-      "content": "тестовый ответ на сообщение",
-      "createdAt": "2026-03-22T13:58:21.823Z",
-      "replyToId": "m300"
+      "content": "Foteack изменил(а) название канала с «updates» на «последние-обновления»",
+      "createdAt": "2026-03-22T19:46:44.889Z"
     }
   ],
-  "nextId": 302,
-  "friendRequests": [
-    {
-      "id": "fr106",
-      "fromId": "101",
-      "toId": "103",
-      "status": "declined",
-      "createdAt": "2026-03-14T15:57:21.889Z"
-    },
-    {
-      "id": "fr108",
-      "fromId": "101",
-      "toId": "107",
-      "status": "accepted",
-      "createdAt": "2026-03-14T15:59:20.434Z"
-    },
-    {
-      "id": "fr113",
-      "fromId": "103",
-      "toId": "101",
-      "status": "declined",
-      "createdAt": "2026-03-14T16:09:46.074Z"
-    },
-    {
-      "id": "fr122",
-      "fromId": "121",
-      "toId": "103",
-      "status": "declined",
-      "createdAt": "2026-03-16T07:56:11.159Z"
-    },
-    {
-      "id": "fr200",
-      "fromId": "103",
-      "toId": "121",
-      "status": "declined",
-      "createdAt": "2026-03-16T09:00:00.000Z"
-    },
-    {
-      "id": "fr161",
-      "fromId": "158",
-      "toId": "121",
-      "status": "accepted",
-      "createdAt": "2026-03-17T09:46:26.877Z"
-    },
-    {
-      "id": "fr275",
-      "fromId": "271",
-      "toId": "121",
-      "status": "accepted",
-      "createdAt": "2026-03-21T19:22:26.455Z"
-    },
-    {
-      "id": "fr279",
-      "fromId": "121",
-      "toId": "101",
-      "status": "declined",
-      "createdAt": "2026-03-21T19:46:23.576Z"
-    },
-    {
-      "id": "fr287",
-      "fromId": "101",
-      "toId": "103",
-      "status": "declined",
-      "createdAt": "2026-03-21T20:22:12.454Z"
-    },
-    {
-      "id": "fr288",
-      "fromId": "101",
-      "toId": "103",
-      "status": "declined",
-      "createdAt": "2026-03-22T07:38:04.047Z"
-    },
-    {
-      "id": "fr289",
-      "fromId": "101",
-      "toId": "103",
-      "status": "declined",
-      "createdAt": "2026-03-22T07:39:25.036Z"
-    },
-    {
-      "id": "fr290",
-      "fromId": "101",
-      "toId": "103",
-      "status": "declined",
-      "createdAt": "2026-03-22T07:39:34.660Z"
-    },
-    {
-      "id": "fr291",
-      "fromId": "101",
-      "toId": "103",
-      "status": "declined",
-      "createdAt": "2026-03-22T07:40:06.136Z"
-    },
-    {
-      "id": "fr292",
-      "fromId": "101",
-      "toId": "103",
-      "status": "declined",
-      "createdAt": "2026-03-22T07:42:02.325Z"
-    },
-    {
-      "id": "fr293",
-      "fromId": "101",
-      "toId": "103",
-      "status": "declined",
-      "createdAt": "2026-03-22T07:42:04.624Z"
-    },
-    {
-      "id": "fr294",
-      "fromId": "101",
-      "toId": "103",
-      "status": "declined",
-      "createdAt": "2026-03-22T07:42:08.758Z"
-    },
-    {
-      "id": "fr295",
-      "fromId": "101",
-      "toId": "103",
-      "status": "declined",
-      "createdAt": "2026-03-22T07:42:58.078Z"
-    },
-    {
-      "id": "fr296",
-      "fromId": "101",
-      "toId": "103",
-      "status": "declined",
-      "createdAt": "2026-03-22T07:47:29.805Z"
-    },
-    {
-      "id": "fr297",
-      "fromId": "101",
-      "toId": "103",
-      "status": "declined",
-      "createdAt": "2026-03-22T07:47:36.205Z"
-    }
-  ],
-  "dmChannels": [
-    {
-      "id": "dm123",
-      "participants": [
-        "103",
-        "121"
-      ],
-      "createdAt": "2026-03-16T07:56:18.219Z"
-    },
-    {
-      "id": "dm162",
-      "participants": [
-        "121",
-        "158"
-      ],
-      "createdAt": "2026-03-17T09:46:37.284Z"
-    },
-    {
-      "id": "dm270",
-      "participants": [
-        "101",
-        "103"
-      ],
-      "createdAt": "2026-03-21T19:13:39.669Z"
-    },
-    {
-      "id": "dm276",
-      "participants": [
-        "121",
-        "271"
-      ],
-      "createdAt": "2026-03-21T19:23:20.498Z"
-    },
-    {
-      "id": "dm280",
-      "participants": [
-        "101",
-        "121"
-      ],
-      "createdAt": "2026-03-21T19:46:35.509Z"
-    }
-  ],
-  "dmMessages": [
-    {
-      "id": "dm124",
-      "dmChannelId": "dm123",
-      "userId": "103",
-      "content": "Hi!",
-      "createdAt": "2026-03-16T07:56:24.481Z"
-    },
-    {
-      "id": "dm125",
-      "dmChannelId": "dm123",
-      "userId": "121",
-      "content": "hi",
-      "createdAt": "2026-03-16T07:56:35.223Z"
-    },
-    {
-      "id": "dm126",
-      "dmChannelId": "dm123",
-      "userId": "103",
-      "content": "",
-      "createdAt": "2026-03-16T08:00:52.644Z",
-      "attachment": {
-        "url": "/uploads/1773648052640-296371.jpg",
-        "fileName": "images (3).jpg",
-        "fileSize": 5574,
-        "mimeType": "image/jpeg",
-        "fileType": "image"
-      }
-    },
-    {
-      "id": "dm127",
-      "dmChannelId": "dm123",
-      "userId": "103",
-      "content": "смотри",
-      "createdAt": "2026-03-16T08:01:02.553Z",
-      "attachment": {
-        "url": "/uploads/1773648062550-814337.jpg",
-        "fileName": "98f34bbb6887eaa99b1fc01bb256ac3e.jpg",
-        "fileSize": 62275,
-        "mimeType": "image/jpeg",
-        "fileType": "image"
-      }
-    },
-    {
-      "id": "dm128",
-      "dmChannelId": "dm123",
-      "userId": "103",
-      "content": "Привет",
-      "createdAt": "2026-03-16T08:06:50.005Z"
-    },
-    {
-      "id": "dm129",
-      "dmChannelId": "dm123",
-      "userId": "103",
-      "content": "как дела?",
-      "createdAt": "2026-03-16T08:06:54.572Z"
-    },
-    {
-      "id": "dm130",
-      "dmChannelId": "dm123",
-      "userId": "103",
-      "content": "да да",
-      "createdAt": "2026-03-16T08:07:02.627Z"
-    },
-    {
-      "id": "dm141",
-      "dmChannelId": "dm123",
-      "userId": "103",
-      "content": "Приглашает вас на сервер **Branch HQ**",
-      "type": "invite",
-      "invite": {
-        "serverId": "s1",
-        "serverName": "Branch HQ",
-        "serverIcon": "BH",
-        "memberCount": 3
-      },
-      "createdAt": "2026-03-16T08:44:29.423Z"
-    },
-    {
-      "id": "dm143",
-      "dmChannelId": "dm123",
-      "userId": "121",
-      "content": "Приглашает вас на сервер **Поебота**",
-      "type": "invite",
-      "invite": {
-        "serverId": "s139",
-        "serverName": "Поебота",
-        "serverIcon": "П",
-        "memberCount": 1
-      },
-      "createdAt": "2026-03-16T08:48:01.017Z",
-      "hiddenFor": [
-        "121"
-      ]
-    },
-    {
-      "id": "dm147",
-      "dmChannelId": "dm123",
-      "userId": "103",
-      "content": "прив",
-      "createdAt": "2026-03-16T10:08:27.321Z",
-      "pinned": false
-    },
-    {
-      "id": "dm148",
-      "dmChannelId": "dm123",
-      "userId": "121",
-      "createdAt": "2026-03-16T10:11:58.823Z",
-      "deleted": true,
-      "deletedAt": "2026-03-16T10:12:01.720Z"
-    },
-    {
-      "id": "dm163",
-      "dmChannelId": "dm162",
-      "userId": "121",
-      "createdAt": "2026-03-17T09:46:42.361Z",
-      "deleted": true,
-      "deletedAt": "2026-03-17T09:46:48.090Z"
-    },
-    {
-      "id": "dm164",
-      "dmChannelId": "dm162",
-      "userId": "121",
-      "content": "Привет",
-      "createdAt": "2026-03-17T09:46:56.335Z"
-    },
-    {
-      "id": "dm165",
-      "dmChannelId": "dm162",
-      "userId": "158",
-      "content": "Привет",
-      "createdAt": "2026-03-17T09:47:05.205Z"
-    },
-    {
-      "id": "dm166",
-      "dmChannelId": "dm162",
-      "userId": "158",
-      "content": "Приглашает вас на сервер ро",
-      "type": "invite",
-      "invite": {
-        "serverId": "s159",
-        "serverName": "ро",
-        "serverIcon": "Р",
-        "memberCount": 1
-      },
-      "createdAt": "2026-03-17T09:47:12.413Z"
-    },
-    {
-      "id": "dm170",
-      "dmChannelId": "dm162",
-      "userId": "158",
-      "content": "Приглашает вас на сервер прп",
-      "type": "invite",
-      "invite": {
-        "serverId": "s168",
-        "serverName": "прп",
-        "serverIcon": "П",
-        "memberCount": 1
-      },
-      "createdAt": "2026-03-17T09:50:28.746Z"
-    },
-    {
-      "id": "dm174",
-      "dmChannelId": "dm162",
-      "userId": "121",
-      "content": "Приглашает вас на сервер рор",
-      "type": "invite",
-      "invite": {
-        "serverId": "s172",
-        "serverName": "рор",
-        "serverIcon": "Р",
-        "memberCount": 1
-      },
-      "createdAt": "2026-03-17T09:52:39.246Z"
-    },
-    {
-      "id": "dm190",
-      "dmChannelId": "dm123",
-      "userId": "121",
-      "content": "Приглашает вас на сервер Поебота",
-      "type": "invite",
-      "invite": {
-        "serverId": "s139",
-        "serverName": "Поебота",
-        "serverIcon": "П",
-        "memberCount": 1
-      },
-      "createdAt": "2026-03-17T15:13:34.677Z",
-      "hiddenFor": [
-        "121"
-      ]
-    },
-    {
-      "id": "dm223",
-      "dmChannelId": "dm123",
-      "userId": "103",
-      "content": "Приглашает вас на сервер Branch HQ",
-      "type": "invite",
-      "invite": {
-        "serverId": "s1",
-        "serverName": "Branch HQ",
-        "serverIcon": "BH",
-        "memberCount": 4
-      },
-      "createdAt": "2026-03-17T15:39:27.113Z"
-    },
-    {
-      "id": "dm235",
-      "dmChannelId": "dm123",
-      "userId": "103",
-      "content": "Приглашает вас на сервер Привьет",
-      "type": "invite",
-      "invite": {
-        "serverId": "s233",
-        "serverName": "Привьет",
-        "serverIcon": "П",
-        "memberCount": 1
-      },
-      "createdAt": "2026-03-18T08:18:42.835Z"
-    },
-    {
-      "id": "dm238",
-      "dmChannelId": "dm123",
-      "userId": "103",
-      "content": "Приглашает вас на сервер Привьет",
-      "type": "invite",
-      "invite": {
-        "serverId": "s233",
-        "serverName": "Привьет",
-        "serverIcon": "П",
-        "memberCount": 1
-      },
-      "createdAt": "2026-03-18T09:12:34.232Z"
-    },
-    {
-      "id": "dm250",
-      "dmChannelId": "dm123",
-      "userId": "103",
-      "content": "Приглашает вас на сервер Поебота",
-      "type": "invite",
-      "invite": {
-        "serverId": "s247",
-        "serverName": "Поебота",
-        "serverIcon": "П",
-        "memberCount": 1
-      },
-      "createdAt": "2026-03-18T09:58:50.659Z"
-    },
-    {
-      "id": "dm252",
-      "dmChannelId": "dm123",
-      "userId": "103",
-      "content": "Приглашает вас на сервер Поебота",
-      "type": "invite",
-      "invite": {
-        "serverId": "s247",
-        "serverName": "Поебота",
-        "serverIcon": "П",
-        "memberCount": 1
-      },
-      "createdAt": "2026-03-18T15:34:35.551Z"
-    },
-    {
-      "id": "dm265",
-      "dmChannelId": "dm123",
-      "userId": "121",
-      "content": "ну че тф",
-      "createdAt": "2026-03-21T14:26:48.756Z"
-    },
-    {
-      "id": "dm266",
-      "dmChannelId": "dm123",
-      "userId": "121",
-      "content": "дебилка",
-      "createdAt": "2026-03-21T14:27:03.386Z"
-    },
-    {
-      "id": "dm267",
-      "dmChannelId": "dm123",
-      "userId": "121",
-      "content": "чего",
-      "createdAt": "2026-03-21T14:27:18.070Z"
-    },
-    {
-      "id": "dm268",
-      "dmChannelId": "dm123",
-      "userId": "121",
-      "content": "чегоё",
-      "createdAt": "2026-03-21T14:27:23.739Z"
-    },
-    {
-      "id": "dm269",
-      "dmChannelId": "dm123",
-      "userId": "121",
-      "content": "прп",
-      "createdAt": "2026-03-21T14:27:33.299Z"
-    },
-    {
-      "id": "dm277",
-      "dmChannelId": "dm276",
-      "userId": "121",
-      "content": "Привет бро",
-      "createdAt": "2026-03-21T19:23:28.589Z",
-      "editedAt": "2026-03-21T19:23:35.205Z"
-    },
-    {
-      "id": "dm278",
-      "dmChannelId": "dm276",
-      "userId": "121",
-      "content": "Приглашает вас на сервер Поебота",
-      "type": "invite",
-      "invite": {
-        "serverId": "s247",
-        "serverName": "Поебота",
-        "serverIcon": "П",
-        "memberCount": 2
-      },
-      "createdAt": "2026-03-21T19:45:29.416Z"
-    },
-    {
-      "id": "dm281",
-      "dmChannelId": "dm280",
-      "userId": "101",
-      "content": "yjhvfc",
-      "createdAt": "2026-03-21T19:46:37.277Z"
-    },
-    {
-      "id": "dm282",
-      "dmChannelId": "dm280",
-      "userId": "121",
-      "content": "Приглашает вас на сервер Поебота",
-      "type": "invite",
-      "invite": {
-        "serverId": "s247",
-        "serverName": "Поебота",
-        "serverIcon": "П",
-        "memberCount": 2
-      },
-      "createdAt": "2026-03-21T19:47:34.714Z"
-    },
-    {
-      "id": "dm284",
-      "dmChannelId": "dm280",
-      "userId": "101",
-      "content": "Приглашает вас в голосовой канал «Voice Chat»",
-      "type": "voice-invite",
-      "voiceInvite": {
-        "serverId": "s1",
-        "serverName": "Branch HQ",
-        "serverIcon": "BH",
-        "channelId": "c300",
-        "channelName": "Voice Chat",
-        "participantCount": 1
-      },
-      "createdAt": "2026-03-21T20:04:23.656Z"
-    },
-    {
-      "id": "dm286",
-      "dmChannelId": "dm270",
-      "userId": "101",
-      "content": "приветё",
-      "createdAt": "2026-03-21T20:18:53.009Z"
-    },
-    {
-      "id": "dm298",
-      "dmChannelId": "dm270",
-      "userId": "101",
-      "content": "",
-      "createdAt": "2026-03-22T07:48:49.328Z",
-      "attachment": {
-        "url": "/uploads/1774165729319-715214.jpg",
-        "fileName": "01_1689951208.jpg",
-        "fileSize": 262634,
-        "mimeType": "image/jpeg",
-        "fileType": "image"
-      }
-    },
-    {
-      "id": "dm299",
-      "dmChannelId": "dm270",
-      "userId": "101",
-      "content": "",
-      "createdAt": "2026-03-22T07:53:10.496Z",
-      "attachment": {
-        "url": "/uploads/1774165990489-628714.webp",
-        "fileName": "gruppovoj-zvonok-diskord-02.webp",
-        "fileSize": 47872,
-        "mimeType": "image/webp",
-        "fileType": "image"
-      }
-    },
-    {
-      "id": "dm302",
-      "dmChannelId": "dm270",
-      "userId": "101",
-      "content": "ответ в лс!",
-      "createdAt": "2026-03-22T13:59:41.876Z",
-      "replyToId": "dm286"
-    }
-  ]
+  "nextId": 7,
+  "friendRequests": [],
+  "dmChannels": [],
+  "dmMessages": []
 }

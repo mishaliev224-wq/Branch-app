@@ -6,8 +6,11 @@ import './App.css'
 const AuthContext = createContext(null)
 export const useAuth = () => useContext(AuthContext)
 
+const getToken = () => localStorage.getItem('token') || sessionStorage.getItem('token')
+const removeToken = () => { localStorage.removeItem('token'); sessionStorage.removeItem('token') }
+
 const API = (path, opts = {}) => {
-  const token = localStorage.getItem('token')
+  const token = getToken()
   return fetch(path, {
     ...opts,
     headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}), ...opts.headers },
@@ -25,21 +28,25 @@ export default function App() {
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    const token = localStorage.getItem('token')
+    const token = getToken()
     if (!token) { setLoading(false); return }
     API('/api/auth/me')
       .then(u => setUser(u))
-      .catch(() => localStorage.removeItem('token'))
+      .catch(() => removeToken())
       .finally(() => setLoading(false))
   }, [])
 
-  const login = (token, userData) => {
-    localStorage.setItem('token', token)
+  const login = (token, userData, remember = false) => {
+    if (remember) {
+      localStorage.setItem('token', token)
+    } else {
+      sessionStorage.setItem('token', token)
+    }
     setUser(userData)
   }
 
   const logout = () => {
-    localStorage.removeItem('token')
+    removeToken()
     setUser(null)
   }
 

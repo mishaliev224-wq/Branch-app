@@ -7,10 +7,44 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { dirname, join, extname } from 'path';
 import { fileURLToPath } from 'url';
 import multer from 'multer';
+import nodemailer from 'nodemailer';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const JWT_SECRET = 'branch-app-secret-2026';
 const DB_PATH = join(__dirname, 'db.json');
+
+// ── Email transporter (dev mode: codes returned in response; production: set SMTP_* env vars) ──
+let mailTransporter = null;
+const DEV_MODE = !process.env.SMTP_HOST;
+if (process.env.SMTP_HOST) {
+  mailTransporter = nodemailer.createTransport({
+    host: process.env.SMTP_HOST,
+    port: Number(process.env.SMTP_PORT) || 587,
+    secure: process.env.SMTP_SECURE === 'true',
+    auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+  });
+  console.log('📧 SMTP configured:', process.env.SMTP_HOST);
+} else {
+  console.log('📧 Dev mode: verification codes will be returned in API response');
+}
+
+// In-memory stores for verification codes
+const verificationCodes = new Map(); // email -> { code, expiresAt, username, password }
+const resetCodes = new Map(); // email -> { code, expiresAt }
+const captchas = new Map(); // captchaId -> { answer, expiresAt }
+
+function genCode() { return String(Math.floor(100000 + Math.random() * 900000)); }
+function genCaptchaId() { return 'cap_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8); }
+
+async function sendEmail(to, subject, html) {
+  if (mailTransporter) {
+    const info = await mailTransporter.sendMail({ from: '"Branch App" <noreply@branch.app>', to, subject, html });
+    const previewUrl = nodemailer.getTestMessageUrl(info);
+    if (previewUrl) console.log('📧 Preview:', previewUrl);
+    return true;
+  }
+  return false;
+}
 
 // ── Database ──
 function loadDB() {
@@ -127,30 +161,133 @@ function genTag() {
   return String(Math.floor(1000 + Math.random() * 9000));
 }
 
+// ── Captcha endpoint ──
+app.get('/api/auth/captcha', (req, res) => {
+  const a = Math.floor(1 + Math.random() * 20);
+  const b = Math.floor(1 + Math.random() * 20);
+  const ops = ['+', '-'];
+  const op = ops[Math.floor(Math.random() * ops.length)];
+  const answer = op === '+' ? a + b : a - b;
+  const id = genCaptchaId();
+  captchas.set(id, { answer, expiresAt: Date.now() + 5 * 60 * 1000 });
+  // Cleanup old captchas
+  for (const [k, v] of captchas) { if (v.expiresAt < Date.now()) captchas.delete(k); }
+  res.json({ captchaId: id, question: `${a} ${op} ${b} = ?` });
+});
+
 // ── Auth Routes ──
+
+// Step 1: Send verification code
+app.post('/api/auth/register/send-code', async (req, res) => {
+  const { username, email, password, captchaId, captchaAnswer } = req.body;
+  if (!username || !email || !password) return res.status(400).json({ error: 'All fields required' });
+  if (username.length < 2) return res.status(400).json({ error: 'Username too short (min 2)' });
+  if (password.length < 6) return res.status(400).json({ error: 'Password too short (min 6)' });
+  if (!/\S+@\S+\.\S+/.test(email)) return res.status(400).json({ error: 'Invalid email format' });
+  // Captcha check
+  if (!captchaId || captchaAnswer === undefined) return res.status(400).json({ error: 'Captcha required' });
+  const cap = captchas.get(captchaId);
+  if (!cap || cap.expiresAt < Date.now()) return res.status(400).json({ error: 'Captcha expired, refresh' });
+  if (Number(captchaAnswer) !== cap.answer) return res.status(400).json({ error: 'Wrong captcha answer' });
+  captchas.delete(captchaId);
+
+  if (db.users.find(u => u.email === email)) return res.status(400).json({ error: 'Email already registered' });
+  if (db.users.find(u => u.username === username)) return res.status(400).json({ error: 'Username taken' });
+
+  const code = genCode();
+  verificationCodes.set(email, { code, expiresAt: Date.now() + 10 * 60 * 1000, username, password });
+  const sent = await sendEmail(email, 'Branch — Verification Code', `<h2>Your verification code</h2><p style="font-size:32px;font-weight:bold;letter-spacing:8px;color:#7c5cfc">${code}</p><p>Valid for 10 minutes.</p>`);
+  console.log(`📧 Verification code for ${email}: ${code}`);
+  const response = { ok: true, message: sent ? 'Code sent to email' : 'Check code below' };
+  if (DEV_MODE) response.code = code;
+  res.json(response);
+});
+
+// Step 2: Verify code and complete registration
+app.post('/api/auth/register/verify', async (req, res) => {
+  const { email, code } = req.body;
+  if (!email || !code) return res.status(400).json({ error: 'Email and code required' });
+  const entry = verificationCodes.get(email);
+  if (!entry) return res.status(400).json({ error: 'No pending verification for this email' });
+  if (entry.expiresAt < Date.now()) { verificationCodes.delete(email); return res.status(400).json({ error: 'Code expired, register again' }); }
+  if (entry.code !== code) return res.status(400).json({ error: 'Wrong code' });
+
+  verificationCodes.delete(email);
+  // Check again in case someone registered while verifying
+  if (db.users.find(u => u.email === email)) return res.status(400).json({ error: 'Email already registered' });
+  if (db.users.find(u => u.username === entry.username)) return res.status(400).json({ error: 'Username taken' });
+
+  const id = genId();
+  const passwordHash = await bcrypt.hash(entry.password, 10);
+  const avatarColor = COLORS[Math.floor(Math.random() * COLORS.length)];
+  const tag = genTag();
+  const user = { id, username: entry.username, email, passwordHash, avatarColor, tag, status: 'online', bio: '', createdAt: new Date().toISOString(), verified: true };
+  db.users.push(user);
+  // Auto-join official server(s)
+  const officialServerId = 's1';
+  const officialServer = db.servers.find(s => s.id === officialServerId);
+  if (officialServer && !db.members.find(m => m.serverId === officialServerId && m.userId === id)) {
+    db.members.push({ serverId: officialServerId, userId: id, role: 'user', joinedAt: new Date().toISOString() });
+  }
+  saveDB();
+  const token = jwt.sign({ id }, JWT_SECRET, { expiresIn: '7d' });
+  res.json({ token, user: { id, username: entry.username, email, avatarColor, tag, status: 'online', bio: '' } });
+});
+
+// Legacy register (fallback)
 app.post('/api/auth/register', async (req, res) => {
   const { username, email, password } = req.body;
   if (!username || !email || !password) return res.status(400).json({ error: 'All fields required' });
   if (username.length < 2) return res.status(400).json({ error: 'Username too short' });
-  if (password.length < 4) return res.status(400).json({ error: 'Password too short' });
+  if (password.length < 6) return res.status(400).json({ error: 'Password too short (min 6)' });
   if (db.users.find(u => u.email === email)) return res.status(400).json({ error: 'Email already registered' });
   if (db.users.find(u => u.username === username)) return res.status(400).json({ error: 'Username taken' });
-
   const id = genId();
   const passwordHash = await bcrypt.hash(password, 10);
   const avatarColor = COLORS[Math.floor(Math.random() * COLORS.length)];
   const tag = genTag();
   const user = { id, username, email, passwordHash, avatarColor, tag, status: 'online', bio: '', createdAt: new Date().toISOString() };
   db.users.push(user);
-
-  // Auto-join default servers
-  for (const s of db.servers.filter(s => s.ownerId === 'system')) {
-    db.members.push({ serverId: s.id, userId: id, joinedAt: new Date().toISOString() });
+  // Auto-join official server(s)
+  const officialServerId = 's1';
+  const officialServer = db.servers.find(s => s.id === officialServerId);
+  if (officialServer && !db.members.find(m => m.serverId === officialServerId && m.userId === id)) {
+    db.members.push({ serverId: officialServerId, userId: id, role: 'user', joinedAt: new Date().toISOString() });
   }
   saveDB();
-
   const token = jwt.sign({ id }, JWT_SECRET, { expiresIn: '7d' });
   res.json({ token, user: { id, username, email, avatarColor, tag, status: 'online', bio: '' } });
+});
+
+// ── Password Reset ──
+app.post('/api/auth/reset/send-code', async (req, res) => {
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ error: 'Email required' });
+  const user = db.users.find(u => u.email === email);
+  if (!user) return res.status(400).json({ error: 'No account with this email' });
+  const code = genCode();
+  resetCodes.set(email, { code, expiresAt: Date.now() + 10 * 60 * 1000 });
+  const sent = await sendEmail(email, 'Branch — Password Reset', `<h2>Password reset code</h2><p style="font-size:32px;font-weight:bold;letter-spacing:8px;color:#7c5cfc">${code}</p><p>Valid for 10 minutes. If you didn't request this, ignore this email.</p>`)
+  console.log(`📧 Reset code for ${email}: ${code}`);
+  const response = { ok: true, message: sent ? 'Code sent to email' : 'Check code below' };
+  if (DEV_MODE) response.code = code;
+  res.json(response);
+});
+
+app.post('/api/auth/reset/verify', async (req, res) => {
+  const { email, code, newPassword } = req.body;
+  if (!email || !code || !newPassword) return res.status(400).json({ error: 'All fields required' });
+  if (newPassword.length < 6) return res.status(400).json({ error: 'Password too short (min 6)' });
+  const entry = resetCodes.get(email);
+  if (!entry) return res.status(400).json({ error: 'No pending reset for this email' });
+  if (entry.expiresAt < Date.now()) { resetCodes.delete(email); return res.status(400).json({ error: 'Code expired' }); }
+  if (entry.code !== code) return res.status(400).json({ error: 'Wrong code' });
+  resetCodes.delete(email);
+  const user = db.users.find(u => u.email === email);
+  if (!user) return res.status(400).json({ error: 'User not found' });
+  user.passwordHash = await bcrypt.hash(newPassword, 10);
+  saveDB();
+  res.json({ ok: true, message: 'Password updated' });
 });
 
 app.post('/api/auth/login', async (req, res) => {
@@ -194,7 +331,8 @@ app.patch('/api/auth/me', auth, (req, res) => {
 // ── Server Routes ──
 app.get('/api/servers', auth, (req, res) => {
   const memberOf = db.members.filter(m => m.userId === req.user.id).map(m => m.serverId);
-  const servers = db.servers.filter(s => memberOf.includes(s.id));
+  const defaultPerms = { deleteMessages: false, deleteChannels: false, createChannels: false, kickMembers: true, manageRoles: false, bypassSlowmode: false };
+  const servers = db.servers.filter(s => memberOf.includes(s.id)).map(s => ({ ...s, adminPermissions: s.adminPermissions || defaultPerms }));
   res.json(servers);
 });
 
@@ -203,7 +341,7 @@ app.post('/api/servers', auth, (req, res) => {
   if (!name || name.length < 2) return res.status(400).json({ error: 'Server name required (min 2 chars)' });
   const id = 's' + genId();
   const iconText = name.split(' ').map(w => w[0]).join('').toUpperCase().slice(0, 2);
-  const server = { id, name, iconText, ownerId: req.user.id, createdAt: new Date().toISOString() };
+  const server = { id, name, iconText, ownerId: req.user.id, createdAt: new Date().toISOString(), adminPermissions: { deleteMessages: false, deleteChannels: false, createChannels: false, kickMembers: true, manageRoles: false, bypassSlowmode: false } };
   db.servers.push(server);
   db.members.push({ serverId: id, userId: req.user.id, joinedAt: new Date().toISOString() });
   // Create default channel
@@ -346,6 +484,12 @@ app.get('/api/servers/:id/channels', auth, (req, res) => {
 });
 
 app.post('/api/servers/:id/channels', auth, (req, res) => {
+  const server = db.servers.find(s => s.id === req.params.id);
+  if (!server) return res.status(404).json({ error: 'Server not found' });
+  const isOwner = server.ownerId === req.user.id;
+  const memberRec = db.members.find(m => m.serverId === req.params.id && m.userId === req.user.id);
+  const isAdmin = memberRec && memberRec.role === 'admin';
+  if (!isOwner && !(isAdmin && server.adminPermissions?.createChannels)) return res.status(403).json({ error: 'No permission' });
   const { name, type } = req.body;
   if (!name || name.length < 2) return res.status(400).json({ error: 'Channel name required' });
   const channelName = name.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9а-яёіїґүөәңғқһ-]/g, '').replace(/^-+|-+$/g, '').replace(/-{2,}/g, '-');
@@ -363,7 +507,10 @@ app.delete('/api/channels/:id', auth, (req, res) => {
   const channel = db.channels.find(c => c.id === req.params.id);
   if (!channel) return res.status(404).json({ error: 'Channel not found' });
   const server = db.servers.find(s => s.id === channel.serverId);
-  if (!server || server.ownerId !== req.user.id) return res.status(403).json({ error: 'Only the server owner can delete channels' });
+  const isOwner = server && server.ownerId === req.user.id;
+  const memberRec = server && db.members.find(m => m.serverId === server.id && m.userId === req.user.id);
+  const isAdmin = memberRec && memberRec.role === 'admin';
+  if (!isOwner && !(isAdmin && server?.adminPermissions?.deleteChannels)) return res.status(403).json({ error: 'No permission to delete channels' });
   // Emit before removing so clients still have room membership
   io.to('server:' + channel.serverId).emit('channel-deleted', { id: req.params.id, serverId: channel.serverId });
   db.channels = db.channels.filter(c => c.id !== req.params.id);
@@ -373,17 +520,80 @@ app.delete('/api/channels/:id', auth, (req, res) => {
 });
 
 app.get('/api/servers/:id/members', auth, (req, res) => {
-  const memberIds = db.members.filter(m => m.serverId === req.params.id).map(m => m.userId);
-  const members = db.users
-    .filter(u => memberIds.includes(u.id))
-    .map(u => ({
+  const serverMembers = db.members.filter(m => m.serverId === req.params.id);
+  const server = db.servers.find(s => s.id === req.params.id);
+  const members = serverMembers.map(sm => {
+    const u = db.users.find(u => u.id === sm.userId);
+    if (!u) return null;
+    return {
       id: u.id,
       username: u.username,
       avatarColor: u.avatarColor,
       tag: u.tag || '0000',
-      status: !onlineUsers.has(u.id) ? 'offline' : (u.status === 'invisible' ? 'offline' : (u.status || 'online'))
-    }));
+      status: !onlineUsers.has(u.id) ? 'offline' : (u.status === 'invisible' ? 'offline' : (u.status || 'online')),
+      role: server && server.ownerId === u.id ? 'owner' : (sm.role || 'user')
+    };
+  }).filter(Boolean);
   res.json(members);
+});
+
+// Set member role (admin/user)
+app.post('/api/servers/:id/members/:userId/role', auth, (req, res) => {
+  const server = db.servers.find(s => s.id === req.params.id);
+  if (!server) return res.status(404).json({ error: 'Server not found' });
+  const isOwner = server.ownerId === req.user.id;
+  const reqMember = db.members.find(m => m.serverId === req.params.id && m.userId === req.user.id);
+  const isAdmin = reqMember && reqMember.role === 'admin';
+  if (!isOwner && !(isAdmin && server.adminPermissions?.manageRoles)) return res.status(403).json({ error: 'No permission to manage roles' });
+  if (req.params.userId === req.user.id) return res.status(400).json({ error: 'Cannot change own role' });
+  const member = db.members.find(m => m.serverId === req.params.id && m.userId === req.params.userId);
+  if (!member) return res.status(404).json({ error: 'Member not found' });
+  const { role } = req.body; // 'admin' or 'user'
+  if (role !== 'admin' && role !== 'user') return res.status(400).json({ error: 'Invalid role' });
+  member.role = role;
+  saveDB();
+  // Notify all server members
+  io.to('server:' + req.params.id).emit('member-role-updated', { serverId: req.params.id, userId: req.params.userId, role });
+  res.json({ ok: true, role });
+});
+
+// Update admin permissions for server
+app.put('/api/servers/:id/permissions', auth, (req, res) => {
+  const server = db.servers.find(s => s.id === req.params.id);
+  if (!server) return res.status(404).json({ error: 'Server not found' });
+  if (server.ownerId !== req.user.id) return res.status(403).json({ error: 'Only owner can change permissions' });
+  const validPerms = ['deleteMessages', 'deleteChannels', 'createChannels', 'kickMembers', 'manageRoles', 'bypassSlowmode'];
+  const perms = {};
+  for (const p of validPerms) perms[p] = !!req.body[p];
+  server.adminPermissions = perms;
+  saveDB();
+  io.to('server:' + req.params.id).emit('server-permissions-updated', { serverId: req.params.id, adminPermissions: perms });
+  res.json({ ok: true, adminPermissions: perms });
+});
+
+// Kick member from server
+app.post('/api/servers/:id/members/:userId/kick', auth, (req, res) => {
+  const server = db.servers.find(s => s.id === req.params.id);
+  if (!server) return res.status(404).json({ error: 'Server not found' });
+  const reqMember = db.members.find(m => m.serverId === req.params.id && m.userId === req.user.id);
+  const isOwner = server.ownerId === req.user.id;
+  const isAdmin = reqMember && reqMember.role === 'admin';
+  if (!isOwner && !(isAdmin && server.adminPermissions?.kickMembers)) return res.status(403).json({ error: 'No permission' });
+  if (req.params.userId === server.ownerId) return res.status(400).json({ error: 'Cannot kick the owner' });
+  // Admins can't kick other admins
+  const targetMember = db.members.find(m => m.serverId === req.params.id && m.userId === req.params.userId);
+  if (!isOwner && targetMember?.role === 'admin') return res.status(403).json({ error: 'Cannot kick an admin' });
+  db.members = db.members.filter(m => !(m.serverId === req.params.id && m.userId === req.params.userId));
+  saveDB();
+  // Notify kicked user
+  const targetSockets = onlineUsers.get(req.params.userId);
+  if (targetSockets) {
+    for (const sid of targetSockets) {
+      io.to(sid).emit('kicked-from-server', { serverId: req.params.id });
+    }
+  }
+  io.to('server:' + req.params.id).emit('member-kicked', { serverId: req.params.id, userId: req.params.userId });
+  res.json({ ok: true });
 });
 
 // ── Channel / Messages Routes ──
@@ -457,7 +667,8 @@ app.post('/api/friends/search', auth, (req, res) => {
   const [username, tag] = query.split('#');
   if (!username || !tag || tag.length !== 4) return res.status(400).json({ error: 'Use format Username#1234' });
   const found = db.users.find(u => u.username.toLowerCase() === username.toLowerCase() && (u.tag || '0000') === tag);
-  if (!found || found.id === req.user.id) return res.status(404).json({ error: 'User not found' });
+  if (!found) return res.status(404).json({ error: 'User not found' });
+  if (found.id === req.user.id) return res.status(400).json({ error: 'self' });
   // Check existing relationship
   const existing = db.friendRequests.find(fr =>
     ((fr.fromId === req.user.id && fr.toId === found.id) || (fr.fromId === found.id && fr.toId === req.user.id))
@@ -709,6 +920,9 @@ app.get('/api/dm-channels/:id/messages', auth, (req, res) => {
   const limit = parseInt(req.query.limit) || 50;
   let msgs = db.dmMessages.filter(m => m.dmChannelId === dm.id);
   msgs = msgs.filter(m => !m.hiddenFor || !m.hiddenFor.includes(req.user.id));
+  // Filter out messages before clearedAt for this user
+  const clearedAt = dm.clearedAt && dm.clearedAt[req.user.id];
+  if (clearedAt) msgs = msgs.filter(m => m.createdAt > clearedAt);
   msgs = msgs.slice(-limit);
   const result = msgs.map(m => {
     const user = db.users.find(u => u.id === m.userId);
@@ -723,6 +937,37 @@ app.get('/api/dm-channels/:id/messages', auth, (req, res) => {
     return obj;
   });
   res.json(result);
+});
+
+// ── DM search ──
+app.get('/api/dm-search', auth, (req, res) => {
+  const q = (req.query.q || '').toLowerCase().trim();
+  if (!q) return res.json([]);
+  const myDMs = db.dmChannels.filter(d => d.participants.includes(req.user.id) && (!d.hiddenFor || !d.hiddenFor.includes(req.user.id)));
+  const results = [];
+  for (const dm of myDMs) {
+    const partnerId = dm.participants.find(p => p !== req.user.id);
+    const partner = db.users.find(u => u.id === partnerId);
+    if (!partner) continue;
+    const clearedAt = dm.clearedAt && dm.clearedAt[req.user.id];
+    let msgs = db.dmMessages.filter(m => m.dmChannelId === dm.id && !m.deleted);
+    if (clearedAt) msgs = msgs.filter(m => m.createdAt > clearedAt);
+    msgs = msgs.filter(m => !m.hiddenFor || !m.hiddenFor.includes(req.user.id));
+    const nameMatch = partner.username.toLowerCase().includes(q);
+    const matchedMsgs = msgs.filter(m => m.content && m.content.toLowerCase().includes(q)).slice(-20).reverse();
+    if (nameMatch || matchedMsgs.length > 0) {
+      results.push({
+        dmId: dm.id,
+        partner: { id: partner.id, username: partner.username, avatarColor: partner.avatarColor, tag: partner.tag || '0000', status: partner.status || 'offline' },
+        matchedMessages: matchedMsgs.map(m => {
+          const u = db.users.find(u => u.id === m.userId);
+          return { id: m.id, content: m.content, createdAt: m.createdAt, userId: m.userId, username: u ? u.username : 'Deleted User' };
+        }),
+        nameMatch
+      });
+    }
+  }
+  res.json(results);
 });
 
 // ── Message actions (edit, delete, pin) ──
@@ -742,22 +987,30 @@ app.put('/api/messages/:id', auth, (req, res) => {
 app.delete('/api/messages/:id', auth, (req, res) => {
   const msg = db.messages.find(m => m.id === req.params.id);
   if (!msg) return res.status(404).json({ error: 'Message not found' });
-  if (msg.userId !== req.user.id) return res.status(403).json({ error: 'Not your message' });
-  const age = Date.now() - new Date(msg.createdAt).getTime();
-  const fifteenMin = 15 * 60 * 1000;
-  if (age < fifteenMin) {
-    // Delete for everyone — mark as deleted
-    msg.deleted = true;
-    msg.deletedAt = new Date().toISOString();
-    delete msg.content;
-    delete msg.attachment;
-    saveDB();
-    io.to('channel:' + msg.channelId).emit('message-deleted-for-all', { id: msg.id });
-  } else {
-    // Delete for me — hide for this user
-    if (!msg.hiddenFor) msg.hiddenFor = [];
-    if (!msg.hiddenFor.includes(req.user.id)) msg.hiddenFor.push(req.user.id);
-    saveDB();
+  // Check if user is owner or admin with deleteMessages permission
+  const channel = db.channels.find(c => c.id === msg.channelId);
+  const server = channel && db.servers.find(s => s.id === channel.serverId);
+  const isOwner = server && server.ownerId === req.user.id;
+  const memberRec = server && db.members.find(m => m.serverId === server.id && m.userId === req.user.id);
+  const isAdmin = memberRec && memberRec.role === 'admin';
+  const canDeleteOthers = isOwner || (isAdmin && server.adminPermissions?.deleteMessages);
+  const isAuthor = msg.userId === req.user.id;
+  if (!isAuthor && !canDeleteOthers) return res.status(403).json({ error: 'Not your message' });
+  if (isAuthor || canDeleteOthers) {
+    const age = Date.now() - new Date(msg.createdAt).getTime();
+    const fifteenMin = 15 * 60 * 1000;
+    if (canDeleteOthers || age < fifteenMin) {
+      msg.deleted = true;
+      msg.deletedAt = new Date().toISOString();
+      delete msg.content;
+      delete msg.attachment;
+      saveDB();
+      io.to('channel:' + msg.channelId).emit('message-deleted-for-all', { id: msg.id });
+    } else {
+      if (!msg.hiddenFor) msg.hiddenFor = [];
+      if (!msg.hiddenFor.includes(req.user.id)) msg.hiddenFor.push(req.user.id);
+      saveDB();
+    }
   }
   res.json({ ok: true });
 });
@@ -859,6 +1112,9 @@ app.delete('/api/dm-channels/:id', auth, (req, res) => {
   } else {
     if (!dm.hiddenFor) dm.hiddenFor = [];
     if (!dm.hiddenFor.includes(req.user.id)) dm.hiddenFor.push(req.user.id);
+    // Remember the timestamp — user won't see messages before this point
+    if (!dm.clearedAt) dm.clearedAt = {};
+    dm.clearedAt[req.user.id] = new Date().toISOString();
   }
   saveDB();
   res.json({ ok: true });
@@ -880,6 +1136,13 @@ app.post('/api/users/:id/block', auth, (req, res) => {
       (f.userId === targetId && f.friendId === req.user.id)
     ));
     saveDB();
+    // Notify blocked user in realtime
+    const targetSockets = onlineUsers.get(targetId);
+    if (targetSockets) {
+      for (const sid of targetSockets) {
+        io.to(sid).emit('blocked-by-user', { userId: req.user.id });
+      }
+    }
   }
   res.json({ ok: true });
 });
@@ -927,7 +1190,7 @@ const voiceState = new Map(); // channelId -> Map<userId, { socketId, username, 
 function getVoiceUsers(channelId) {
   const map = voiceState.get(channelId);
   if (!map) return [];
-  return [...map.values()].map(v => ({ id: v.userId, username: v.username, avatarColor: v.avatarColor, tag: v.tag, socketId: v.socketId, camera: v.camera || false, screen: v.screen || false }));
+  return [...map.values()].map(v => ({ id: v.userId, username: v.username, avatarColor: v.avatarColor, tag: v.tag, socketId: v.socketId, camera: v.camera || false, screen: v.screen || false, muted: v.muted || false, deafened: v.deafened || false }));
 }
 
 // API to get voice state for a server's channels
@@ -1024,7 +1287,7 @@ io.on('connection', (socket) => {
       const member = db.members.find(m => m.serverId === channel.serverId && m.userId === uid);
       const isOwner = server && server.ownerId === uid;
       const isAdmin = member && member.role === 'admin';
-      if (!isOwner && !isAdmin) {
+      if (!isOwner && !(isAdmin && server?.adminPermissions?.bypassSlowmode)) {
         const lastMsg = [...db.messages].reverse().find(m => m.channelId === channelId && m.userId === uid && m.type !== 'system');
         if (lastMsg) {
           const elapsed = (Date.now() - new Date(lastMsg.createdAt).getTime()) / 1000;
@@ -1036,7 +1299,7 @@ io.on('connection', (socket) => {
       }
     }
 
-    const text = (content || '').trim();
+    const text = (content || '').trim().slice(0, 200);
     if (!text && !attachment) return;
     const id = 'm' + genId();
     const msg = {
@@ -1075,7 +1338,9 @@ io.on('connection', (socket) => {
     const sender = db.users.find(u => u.id === uid);
     const partner = db.users.find(u => u.id === partnerId);
     if (sender?.blockedUsers?.includes(partnerId) || partner?.blockedUsers?.includes(uid)) return;
-    const text = (content || '').trim();
+    // Unhide DM channel for both participants when new message is sent
+    if (dm.hiddenFor) dm.hiddenFor = dm.hiddenFor.filter(id => id !== uid);
+    const text = (content || '').trim().slice(0, 200);
     if (!text && !attachment) return;
     const id = 'dm' + genId();
     const msg = { id, dmChannelId, userId: uid, content: text, createdAt: new Date().toISOString() };
@@ -1134,6 +1399,20 @@ io.on('connection', (socket) => {
         users.delete(uid);
         socket.leave('voice:' + chId);
         if (users.size === 0) voiceState.delete(chId);
+        const ch = db.channels.find(c => c.id === chId);
+        if (ch) io.to('server:' + ch.serverId).emit('voice-state-update', { channelId: chId, users: getVoiceUsers(chId) });
+        break;
+      }
+    }
+  });
+
+  // Voice mute/deafen state
+  socket.on('voice-mute-state', ({ muted, deafened }) => {
+    for (const [chId, users] of voiceState) {
+      if (users.has(uid)) {
+        const userData = users.get(uid);
+        userData.muted = !!muted;
+        userData.deafened = !!deafened;
         const ch = db.channels.find(c => c.id === chId);
         if (ch) io.to('server:' + ch.serverId).emit('voice-state-update', { channelId: chId, users: getVoiceUsers(chId) });
         break;

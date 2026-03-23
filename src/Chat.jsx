@@ -428,6 +428,9 @@ export default function Chat() {
   const [channelsCollapsed, setChannelsCollapsed] = useState(false)
   const [showServerSettings, setShowServerSettings] = useState(false)
   const [serverSettingsName, setServerSettingsName] = useState('')
+  const [serverSettingsTab, setServerSettingsTab] = useState('general')
+  const [memberSearchQuery, setMemberSearchQuery] = useState('')
+  const [srvMemberSearch, setSrvMemberSearch] = useState('')
   const [showChannelSettings, setShowChannelSettings] = useState(null)
   const [channelSettingsName, setChannelSettingsName] = useState('')
   const [channelSettingsTab, setChannelSettingsTab] = useState('general') // general, permissions, slowmode
@@ -461,9 +464,11 @@ export default function Chat() {
   const [appLang, setAppLang] = useState(getLanguage)
   const [appTheme, setAppTheme] = useState(() => localStorage.getItem('appTheme') || 'dark')
   const [appAccent, setAppAccent] = useState(() => localStorage.getItem('appAccent') || '#00d4aa')
+  const [streamerMode, setStreamerMode] = useState(() => localStorage.getItem('streamerMode') === 'true')
   const [, forceUpdate] = useState(0)
   const [showFriends, setShowFriends] = useState(true)
   const [friendsTab, setFriendsTab] = useState('all')
+  const [friendsSearch, setFriendsSearch] = useState('')
   const [friends, setFriends] = useState([])
   const [friendRequests, setFriendRequests] = useState([])
   const [sentFriendRequests, setSentFriendRequests] = useState(new Map()) // userId -> requestId
@@ -494,6 +499,10 @@ export default function Chat() {
   const [activeDM, setActiveDM] = useState(null)
   const [dmMessages, setDmMessages] = useState([])
   const [dmCtx, setDmCtx] = useState(null) // { dm, x, y }
+  const [dmSearchQuery, setDmSearchQuery] = useState('')
+  const [dmSearchResults, setDmSearchResults] = useState(null) // null = no search, [] = searching
+  const dmSearchTimer = useRef(null)
+  const [dmSearchExpanded, setDmSearchExpanded] = useState(null) // dmId of expanded result
   const dmCtxRef = useRef(null)
   const [dmMuteSub, setDmMuteSub] = useState(false)
   const [blockedUsers, setBlockedUsers] = useState([])
@@ -511,6 +520,7 @@ export default function Chat() {
   const [voiceInviteSending, setVoiceInviteSending] = useState({})
   const [inviteSending, setInviteSending] = useState({})
   const [msgCtx, setMsgCtx] = useState(null) // { msg, x, y, isDM }
+  const [memberCtx, setMemberCtx] = useState(null) // { member, x, y }
   const msgCtxRef = useRef(null)
   const [editingMsg, setEditingMsg] = useState(null) // { id, content }
   const editInputRef = useRef(null)
@@ -532,11 +542,22 @@ export default function Chat() {
 
   const addToast = useCallback((toast) => {
     const id = ++toastIdRef.current
-    setToasts(prev => [...prev.slice(-4), { ...toast, id }])
+    setToasts(prev => [...prev.slice(-2), { ...toast, id }])
     setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 5000)
     return id
   }, [])
   const removeToast = useCallback((id) => setToasts(prev => prev.filter(t => t.id !== id)), [])
+  const [copiedName, setCopiedName] = useState(false)
+  const [emailRevealed, setEmailRevealed] = useState(false)
+  const [copyTooltip, setCopyTooltip] = useState(null) // { x, y }
+  const copyUsername = useCallback((username, tag, e) => {
+    if (e) e.stopPropagation()
+    const text = `${username}#${tag}`
+    navigator.clipboard.writeText(text).catch(() => {})
+    setCopiedName(true)
+    if (e) setCopyTooltip({ x: e.clientX, y: e.clientY })
+    setTimeout(() => { setCopiedName(false); setCopyTooltip(null) }, 1500)
+  }, [])
 
   // Unread notifications state
   const [unreadChannels, setUnreadChannels] = useState({}) // { channelId: count }
@@ -598,6 +619,59 @@ export default function Chat() {
   const cameraPopupRef = useRef(null)
   const gainNodeRef = useRef(null)
 
+  // ── Active server ref (for socket handlers) ──
+  const activeServerRef = useRef(null)
+  useEffect(() => { activeServerRef.current = activeServer }, [activeServer])
+
+  // ── App sounds ──
+  const playSoundRef = useRef(null)
+  const playSound = useCallback((type) => {
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)()
+      const osc = ctx.createOscillator()
+      const gain = ctx.createGain()
+      osc.connect(gain)
+      gain.connect(ctx.destination)
+      const vol = (soundVolume / 100) * 0.15
+      if (type === 'message-send') {
+        osc.type = 'sine'
+        osc.frequency.setValueAtTime(880, ctx.currentTime)
+        osc.frequency.exponentialRampToValueAtTime(1320, ctx.currentTime + 0.08)
+        gain.gain.setValueAtTime(vol, ctx.currentTime)
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.15)
+        osc.start(ctx.currentTime)
+        osc.stop(ctx.currentTime + 0.15)
+      } else if (type === 'message-receive') {
+        osc.type = 'sine'
+        osc.frequency.setValueAtTime(587, ctx.currentTime)
+        osc.frequency.setValueAtTime(784, ctx.currentTime + 0.08)
+        gain.gain.setValueAtTime(vol, ctx.currentTime)
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.2)
+        osc.start(ctx.currentTime)
+        osc.stop(ctx.currentTime + 0.2)
+      } else if (type === 'notification') {
+        osc.type = 'sine'
+        osc.frequency.setValueAtTime(523, ctx.currentTime)
+        osc.frequency.setValueAtTime(659, ctx.currentTime + 0.1)
+        osc.frequency.setValueAtTime(784, ctx.currentTime + 0.2)
+        gain.gain.setValueAtTime(vol, ctx.currentTime)
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.35)
+        osc.start(ctx.currentTime)
+        osc.stop(ctx.currentTime + 0.35)
+      } else if (type === 'error') {
+        osc.type = 'square'
+        osc.frequency.setValueAtTime(200, ctx.currentTime)
+        osc.frequency.setValueAtTime(150, ctx.currentTime + 0.1)
+        gain.gain.setValueAtTime(vol * 0.5, ctx.currentTime)
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.2)
+        osc.start(ctx.currentTime)
+        osc.stop(ctx.currentTime + 0.2)
+      }
+      setTimeout(() => ctx.close(), 500)
+    } catch {}
+  }, [soundVolume])
+  useEffect(() => { playSoundRef.current = playSound }, [playSound])
+
   // Connect socket
   useEffect(() => {
     const token = localStorage.getItem('token')
@@ -624,6 +698,7 @@ export default function Chat() {
           avatarColor: avatarColor || '#666',
           content: attachment ? (content || t('msg.attachment')) : (content || ''),
         })
+        playSoundRef.current?.('message-receive')
       }
     })
 
@@ -654,9 +729,11 @@ export default function Chat() {
         if (prev.find(r => r.id === fr.id)) return prev
         return [...prev, fr]
       })
+      playSoundRef.current?.('notification')
     })
 
     socket.on('friend-request-accepted', ({ requestId, friend }) => {
+      playSoundRef.current?.('notification')
       setFriendRequests(prev => prev.filter(r => r.id !== requestId))
       setFriends(prev => {
         if (prev.find(f => f.id === friend.id)) return prev
@@ -668,6 +745,13 @@ export default function Chat() {
     socket.on('friend-removed', ({ userId }) => {
       setFriends(prev => prev.filter(f => f.id !== userId))
       setSentFriendRequests(prev => { const n = new Map(prev); n.delete(userId); return n })
+    })
+
+    socket.on('blocked-by-user', ({ userId }) => {
+      // If currently in DM with this user, update blockedByPartner
+      if (activeDMRef.current?.partner?.id === userId) {
+        setBlockedByPartner(true)
+      }
     })
 
     socket.on('friend-request-cancelled', ({ requestId }) => {
@@ -700,6 +784,7 @@ export default function Chat() {
             avatarColor: msg.user?.avatarColor || '#666',
             content: msg.attachment ? (msg.content || t('msg.attachment')) : (msg.content || ''),
           })
+          playSoundRef.current?.('message-receive')
         }
       }
     })
@@ -787,6 +872,24 @@ export default function Chat() {
     })
 
     // Voice events
+    socket.on('member-role-updated', ({ serverId, userId, role }) => {
+      setMembers(prev => prev.map(m => m.id === userId ? { ...m, role } : m))
+    })
+
+    socket.on('kicked-from-server', ({ serverId }) => {
+      setServers(prev => prev.filter(s => s.id !== serverId))
+      if (activeServerRef.current?.id === serverId) { setActiveServer(null); setShowFriends(true) }
+    })
+
+    socket.on('member-kicked', ({ serverId, userId }) => {
+      setMembers(prev => prev.filter(m => m.id !== userId))
+    })
+
+    socket.on('server-permissions-updated', ({ serverId, adminPermissions }) => {
+      setServers(prev => prev.map(s => s.id === serverId ? { ...s, adminPermissions } : s))
+      setActiveServer(prev => prev && prev.id === serverId ? { ...prev, adminPermissions } : prev)
+    })
+
     socket.on('voice-state-update', ({ channelId, users }) => {
       setVoiceUsers(prev => ({ ...prev, [channelId]: users }))
     })
@@ -1007,6 +1110,7 @@ export default function Chat() {
       audioTrack.enabled = !newMuted
     }
     setVoiceMuted(newMuted)
+    socketRef.current?.emit('voice-mute-state', { muted: newMuted, deafened: voiceDeafened })
   }
 
   const toggleVoiceDeafen = () => {
@@ -1021,6 +1125,7 @@ export default function Chat() {
         if (t) t.enabled = false
       }
       setVoiceMuted(true)
+      socketRef.current?.emit('voice-mute-state', { muted: true, deafened: true })
     } else {
       // Undeafen restores mic
       if (localStream.current) {
@@ -1028,6 +1133,7 @@ export default function Chat() {
         if (t) t.enabled = true
       }
       setVoiceMuted(false)
+      socketRef.current?.emit('voice-mute-state', { muted: false, deafened: false })
     }
   }
 
@@ -1229,7 +1335,7 @@ export default function Chat() {
   useEffect(() => {
     API('/api/servers').then(s => {
       setServers(s)
-      if (s.length > 0 && !activeServer) setActiveServer(s[0])
+      // Don't auto-select a server on load — start on friends/DM screen
     })
   }, [])
 
@@ -1280,7 +1386,7 @@ export default function Chat() {
   const handleMessagesScroll = useCallback((e) => {
     const el = e.target
     const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
-    setShowScrollBtn(distFromBottom > 300)
+    setShowScrollBtn(distFromBottom > 50)
   }, [])
 
   const scrollToBottom = useCallback(() => {
@@ -1301,6 +1407,8 @@ export default function Chat() {
     socket.emit('send-message', { channelId: activeChannel.id, content: input, replyToId: replyTo && !replyTo.isDM ? replyTo.id : undefined })
     setInput('')
     setReplyTo(null)
+    playSound('message-send')
+    setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 100)
     // Start client-side cooldown if channel has slowmode
     if (activeChannel.slowmode && activeChannel.slowmode > 0) {
       const isOwner = activeServer && activeServer.ownerId === user.id
@@ -1587,6 +1695,8 @@ export default function Chat() {
     socket.emit('send-dm', { dmChannelId: activeDM.id, content: input, replyToId: replyTo && replyTo.isDM ? replyTo.id : undefined })
     setInput('')
     setReplyTo(null)
+    playSound('message-send')
+    setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 100)
   }
 
   const handleFriendNameKey = (e) => {
@@ -1612,7 +1722,7 @@ export default function Chat() {
       const data = await API('/api/friends/search', { method: 'POST', body: JSON.stringify({ query }) })
       setFriendSearchResult(data)
     } catch (err) {
-      setFriendSearchError(err.message)
+      setFriendSearchError(err.message === 'self' ? 'Это вы, господин!' : err.message)
     } finally {
       setFriendSearching(false)
     }
@@ -1836,6 +1946,33 @@ export default function Chat() {
       if (vc) joinVoiceChannel(vc)
     }
   }
+
+  const kickMember = async (memberId) => {
+    if (!activeServer) return
+    try {
+      await API(`/api/servers/${activeServer.id}/members/${memberId}/kick`, { method: 'POST' })
+      setMembers(prev => prev.filter(m => m.id !== memberId))
+    } catch {}
+  }
+
+  const toggleMemberRole = async (memberId, currentRole) => {
+    if (!activeServer) return
+    const newRole = currentRole === 'admin' ? 'user' : 'admin'
+    try {
+      await API(`/api/servers/${activeServer.id}/members/${memberId}/role`, { method: 'POST', body: JSON.stringify({ role: newRole }) })
+      setMembers(prev => prev.map(m => m.id === memberId ? { ...m, role: newRole } : m))
+    } catch {}
+    setMemberCtx(null)
+  }
+
+  // Helper: check if current user has a permission on active server
+  const hasServerPerm = useCallback((perm) => {
+    if (!activeServer) return false
+    if (activeServer.ownerId === user.id) return true
+    const myMember = members.find(m => m.id === user.id)
+    if (myMember?.role === 'admin' && activeServer.adminPermissions?.[perm]) return true
+    return false
+  }, [activeServer, members, user.id])
 
   // ── Message context menu ──
   const handleMsgContext = (e, msg, isDM = false) => {
@@ -2124,6 +2261,8 @@ export default function Chat() {
         socket.emit('send-message', { channelId: activeChannel.id, content: uploadComment.trim(), attachment })
       }
       closeUploadDialog()
+      playSound('message-send')
+      setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 100)
     } catch (err) {
       alert(t('upload.failed') + ': ' + err.message)
     } finally {
@@ -2222,6 +2361,7 @@ export default function Chat() {
             >
               <span>{s.iconText}</span>
               <div className="server-pill" />
+              {s.verified && <div className="server-verified-badge"><svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M12 1l3.09 2.26L19 4l.74 3.91L22 11l-2.26 3.09L19 18l-3.91.74L12 21l-3.09-2.26L5 18l-.74-3.91L2 11l2.26-3.09L5 4l3.91-.74L12 1z" fill="#5865f2"/><path d="M8.5 12l2.5 2.5 5-5" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg></div>}
               {sUnread > 0 && <div className="server-badge">{sUnread > 99 ? '99+' : sUnread}</div>}
             </button>
           )})}
@@ -2238,7 +2378,7 @@ export default function Chat() {
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
             <span>{t('channel.markRead')}</span>
           </button>
-          <button className="ctx-item" onClick={() => { setShowInviteModal({ serverId: serverCtx.server.id, serverName: serverCtx.server.name }); setInviteSending({}); loadFriends(); setServerCtx(null) }}>
+          <button className="ctx-item" onClick={() => { { const sid = serverCtx.server.id; setShowInviteModal({ serverId: sid, serverName: serverCtx.server.name, memberIds: [] }); setInviteSending({}); loadFriends(); API(`/api/servers/${sid}/members`).then(m => setShowInviteModal(prev => prev ? { ...prev, memberIds: m.map(x => x.userId || x.id) } : prev)).catch(() => {}); setServerCtx(null) } }}>
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M16 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="20" y1="8" x2="20" y2="14"/><line x1="23" y1="11" x2="17" y2="11"/></svg>
             <span>{t('server.invite')}</span>
           </button>
@@ -2338,7 +2478,7 @@ export default function Chat() {
             <div className={`upc-status-dot ${userProfilePopup.user?.status || 'offline'}`} />
           </div>
           <div className="upc-body">
-            <div className="upc-name">{userProfilePopup.user?.username}<span className="user-tag">#{userProfilePopup.user?.tag}</span></div>
+            <div className={`upc-name copyable-name ${streamerMode && userProfilePopup.user?.id === user.id ? 'streamer-blur' : ''}`} onClick={(e) => copyUsername(userProfilePopup.user?.username, userProfilePopup.user?.tag, e)} title={copiedName ? '✓ Скопировано!' : 'Нажмите чтобы скопировать'}>{userProfilePopup.user?.username}<span className="user-tag">#{userProfilePopup.user?.tag}</span></div>
             {userProfilePopup.user?.bio && (
               <div className="upc-section">
                 <div className="upc-section-title">О СЕБЕ</div>
@@ -2414,7 +2554,28 @@ export default function Chat() {
           <>
             <div className="dm-search-bar">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
-              <span>{t('common.search')}</span>
+              <input
+                className="dm-search-input"
+                placeholder={t('common.search')}
+                value={dmSearchQuery}
+                onChange={e => {
+                  const val = e.target.value
+                  setDmSearchQuery(val)
+                  if (dmSearchTimer.current) clearTimeout(dmSearchTimer.current)
+                  if (!val.trim()) { setDmSearchResults(null); return }
+                  dmSearchTimer.current = setTimeout(async () => {
+                    try {
+                      const res = await API('/api/dm-search?q=' + encodeURIComponent(val.trim()))
+                      setDmSearchResults(res)
+                    } catch { setDmSearchResults([]) }
+                  }, 300)
+                }}
+              />
+              {dmSearchQuery && (
+                <button className="dm-search-clear" onClick={() => { setDmSearchQuery(''); setDmSearchResults(null) }}>
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                </button>
+              )}
             </div>
             <div className="channel-list dm-nav">
               <button className={`dm-nav-item ${!activeDM ? 'active' : ''}`} onClick={() => setActiveDM(null)}>
@@ -2423,9 +2584,87 @@ export default function Chat() {
                 {(friendRequests.length + outgoingRequests.length) > 0 && <span className="nav-badge pending">{friendRequests.length + outgoingRequests.length}</span>}
               </button>
               <button className="dm-nav-item dm-nav-store" disabled>
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
-                <span>{t('common.search')}</span>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M6 2L3 7v11a2 2 0 002 2h14a2 2 0 002-2V7l-3-5z"/><line x1="3" y1="7" x2="21" y2="7"/><path d="M16 11a4 4 0 01-8 0"/></svg>
+                <span>{t('common.store')}</span>
               </button>
+              {dmSearchResults ? (
+                <>
+                  <div className="dm-section-header"><span>{t('common.search')} — {dmSearchResults.length} чат(ов)</span></div>
+                  {dmSearchResults.length === 0 && <div className="dm-search-empty">Ничего не найдено</div>}
+                  {dmSearchResults.map(r => {
+                    const highlightText = (text, query) => {
+                      if (!text || !query) return text
+                      const idx = text.toLowerCase().indexOf(query.toLowerCase())
+                      if (idx === -1) return text
+                      return <>{text.slice(0, idx)}<mark>{text.slice(idx, idx + query.length)}</mark>{text.slice(idx + query.length)}</>
+                    }
+                    const isExpanded = dmSearchExpanded === r.dmId
+                    const goToMessage = (msgId) => {
+                      const dm = dmChannels.find(d => d.id === r.dmId)
+                      if (dm) {
+                        setActiveDM(dm)
+                        setDmSearchQuery('')
+                        setDmSearchResults(null)
+                        setDmSearchExpanded(null)
+                        const tryHighlight = (msgId2, attempts) => {
+                          const el = document.getElementById('msg-' + msgId2)
+                          if (el) {
+                            el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+                            el.classList.remove('msg-highlight')
+                            void el.offsetWidth
+                            el.classList.add('msg-highlight')
+                            setTimeout(() => el.classList.remove('msg-highlight'), 2000)
+                          } else if (attempts > 0) {
+                            setTimeout(() => tryHighlight(msgId2, attempts - 1), 300)
+                          }
+                        }
+                        setTimeout(() => tryHighlight(msgId, 5), 300)
+                      }
+                    }
+                    return (
+                      <div key={r.dmId} className="dm-search-result">
+                        <button
+                          className={`dm-item ${activeDM?.id === r.dmId ? 'active' : ''}`}
+                          onClick={() => {
+                            if (r.matchedMessages && r.matchedMessages.length > 0) {
+                              setDmSearchExpanded(isExpanded ? null : r.dmId)
+                            } else {
+                              const dm = dmChannels.find(d => d.id === r.dmId)
+                              if (dm) { setActiveDM(dm); setDmSearchQuery(''); setDmSearchResults(null) }
+                            }
+                          }}
+                        >
+                          <div className="dm-item-avatar" style={{ background: r.partner.avatarColor }}>
+                            {r.partner.username[0].toUpperCase()}
+                            <div className={`status-dot ${r.partner.status || 'offline'}`} />
+                          </div>
+                          <div className="dm-item-info">
+                            <span className="dm-item-name">{r.nameMatch ? highlightText(r.partner.username, dmSearchQuery) : r.partner.username}</span>
+                            {r.matchedMessages && r.matchedMessages.length > 0 && (
+                              <span className="dm-item-last dm-search-match">{r.matchedMessages.length} сообщ. найдено</span>
+                            )}
+                          </div>
+                          {r.matchedMessages && r.matchedMessages.length > 0 && (
+                            <svg className={`dm-search-chevron ${isExpanded ? 'open' : ''}`} width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><polyline points="6 9 12 15 18 9"/></svg>
+                          )}
+                        </button>
+                        {isExpanded && r.matchedMessages && (
+                          <div className="dm-search-messages">
+                            {r.matchedMessages.map(msg => (
+                              <button key={msg.id} className="dm-search-msg-item" onClick={(e) => { e.stopPropagation(); goToMessage(msg.id) }}>
+                                <div className="dm-search-msg-author">{msg.username}</div>
+                                <div className="dm-search-msg-text">{highlightText(msg.content, dmSearchQuery)}</div>
+                                <div className="dm-search-msg-time">{new Date(msg.createdAt).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' })} {new Date(msg.createdAt).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}</div>
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })}
+                </>
+              ) : (
+                <>
               <div className="dm-section-header">
                 <span>{t('nav.directMessages')}</span>
                 <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
@@ -2434,9 +2673,6 @@ export default function Chat() {
                       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
                     </button>
                   )}
-                  <button title="Новое сообщение" onClick={() => { setActiveDM(null); setFriendsTab('all') }}>
-                    <svg width="14" height="14" viewBox="0 0 20 20" fill="none"><path d="M10 4v12M4 10h12" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/></svg>
-                  </button>
                 </div>
               </div>
               {dmChannels.map(dm => {
@@ -2474,28 +2710,30 @@ export default function Chat() {
                   )}
                 </button>
               )})}
+                </>
+              )}
             </div>
           </>
         ) : activeServer ? (
           <>
             <div className="channel-header server-header-dropdown" ref={serverMenuRef}>
               <button className={`server-header-btn ${showServerMenu ? 'open' : ''}`} onClick={() => setShowServerMenu(v => !v)}>
-                <h3>{activeServer.name}</h3>
+                <h3>{activeServer.name}{activeServer.verified && <svg className="server-verified-icon" width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M12 1l3.09 2.26L19 4l.74 3.91L22 11l-2.26 3.09L19 18l-3.91.74L12 21l-3.09-2.26L5 18l-.74-3.91L2 11l2.26-3.09L5 4l3.91-.74L12 1z" fill="#5865f2"/><path d="M8.5 12l2.5 2.5 5-5" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>}</h3>
                 <svg className="server-header-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><polyline points="6 9 12 15 18 9"/></svg>
               </button>
               {showServerMenu && (
                 <div className="server-dropdown-menu">
-                  <button className="ctx-item" onClick={() => { setShowInviteModal({ serverId: activeServer.id, serverName: activeServer.name }); setInviteSending({}); loadFriends(); setShowServerMenu(false) }}>
+                  <button className="ctx-item" onClick={() => { { const sid = activeServer.id; setShowInviteModal({ serverId: sid, serverName: activeServer.name, memberIds: [] }); setInviteSending({}); loadFriends(); API(`/api/servers/${sid}/members`).then(m => setShowInviteModal(prev => prev ? { ...prev, memberIds: m.map(x => x.userId || x.id) } : prev)).catch(() => {}); setShowServerMenu(false) } }}>
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M16 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="20" y1="8" x2="20" y2="14"/><line x1="23" y1="11" x2="17" y2="11"/></svg>
                     <span>{t('server.invite')}</span>
                   </button>
-                  {activeServer.ownerId === user.id && (
+                  {(activeServer.ownerId === user.id || members.find(m => m.id === user.id)?.role === 'admin') && (
                     <button className="ctx-item" onClick={() => { setServerSettingsName(activeServer.name); setShowServerSettings(true); setShowServerMenu(false) }}>
                       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
                       <span>{t('server.settings')}</span>
                     </button>
                   )}
-                  {activeServer.ownerId === user.id && (
+                  {hasServerPerm('createChannels') && (
                     <button className="ctx-item" onClick={() => { setShowCreateChannel(true); setShowServerMenu(false) }}>
                       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v8M8 12h8"/></svg>
                       <span>{t('channel.create')}</span>
@@ -2527,7 +2765,7 @@ export default function Chat() {
                   <svg className={`channel-category-arrow ${channelsCollapsed ? 'collapsed' : ''}`} width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"><polyline points="6 9 12 15 18 9"/></svg>
                   <span>{t('nav.textChannels')}</span>
                 </div>
-                {activeServer && activeServer.ownerId === user.id && (
+                {activeServer && hasServerPerm('createChannels') && (
                   <button onClick={() => setShowCreateChannel(true)} title="Create Channel">
                     <svg width="14" height="14" viewBox="0 0 20 20" fill="none"><path d="M10 4v12M4 10h12" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/></svg>
                   </button>
@@ -2562,7 +2800,7 @@ export default function Chat() {
                   <svg className={`channel-category-arrow ${voiceChannelsCollapsed ? 'collapsed' : ''}`} width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"><polyline points="6 9 12 15 18 9"/></svg>
                   <span>{t('nav.voiceChannels')}</span>
                 </div>
-                {activeServer && activeServer.ownerId === user.id && (
+                {activeServer && hasServerPerm('createChannels') && (
                   <button onClick={() => setShowCreateVoiceChannel(true)} title="Create Voice Channel">
                     <svg width="14" height="14" viewBox="0 0 20 20" fill="none"><path d="M10 4v12M4 10h12" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/></svg>
                   </button>
@@ -2590,7 +2828,7 @@ export default function Chat() {
                             </div>
                             <span className="voice-user-name">{vu.username}</span>
                             <div className="voice-user-icons">
-                              {vu.id === user.id && voiceMuted && (
+                              {(vu.id === user.id ? voiceMuted : vu.muted) && (
                                 <svg className="voice-user-status-icon" width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="var(--danger)" strokeWidth="1.5" strokeLinecap="round">
                                   <rect x="5" y="1" width="6" height="9" rx="3"/>
                                   <path d="M3 7v1a5 5 0 0010 0V7"/>
@@ -2598,12 +2836,10 @@ export default function Chat() {
                                   <line x1="13" y1="2" x2="3" y2="14"/>
                                 </svg>
                               )}
-                              {vu.id === user.id && voiceDeafened && (
-                                <svg className="voice-user-status-icon" width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="var(--danger)" strokeWidth="1.5" strokeLinecap="round">
-                                  <path d="M8 3v8l-3-2.5H2V5.5h3L8 3z"/>
-                                  <path d="M11 6a3 3 0 010 4"/>
-                                  <path d="M13 4.5a5.5 5.5 0 010 7"/>
-                                  <line x1="13" y1="2" x2="3" y2="14"/>
+                              {(vu.id === user.id ? voiceDeafened : vu.deafened) && (
+                                <svg className="voice-user-status-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--danger)" strokeWidth="2" strokeLinecap="round">
+                                  <path d="M3 14h3a2 2 0 012 2v3a2 2 0 01-2 2H5a2 2 0 01-2-2v-7a9 9 0 0118 0v7a2 2 0 01-2 2h-1a2 2 0 01-2-2v-3a2 2 0 012-2h3"/>
+                                  <line x1="21" y1="3" x2="3" y2="21"/>
                                 </svg>
                               )}
                             </div>
@@ -2638,9 +2874,9 @@ export default function Chat() {
                   </button>
                   <button className={`voice-ctrl-btn ${voiceDeafened ? 'active' : ''}`} onClick={toggleVoiceDeafen} title={voiceDeafened ? t('voice.undeafen') : t('voice.deafen')}>
                     {voiceDeafened ? (
-                      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><path d="M8 3v8l-3-2.5H2V5.5h3L8 3z"/><path d="M11 6a3 3 0 010 4"/><line x1="13" y1="2" x2="3" y2="14"/></svg>
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M3 14h3a2 2 0 012 2v3a2 2 0 01-2 2H5a2 2 0 01-2-2v-7a9 9 0 0118 0v7a2 2 0 01-2 2h-1a2 2 0 01-2-2v-3a2 2 0 012-2h3"/><line x1="21" y1="3" x2="3" y2="21"/></svg>
                     ) : (
-                      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><path d="M8 3v8l-3-2.5H2V5.5h3L8 3z"/><path d="M11 6a3 3 0 010 4"/><path d="M13 4.5a5.5 5.5 0 010 7"/></svg>
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M3 14h3a2 2 0 012 2v3a2 2 0 01-2 2H5a2 2 0 01-2-2v-7a9 9 0 0118 0v7a2 2 0 01-2 2h-1a2 2 0 01-2-2v-3a2 2 0 012-2h3"/></svg>
                     )}
                   </button>
                   <button className="voice-ctrl-btn voice-ctrl-disconnect" onClick={leaveVoiceChannel} title={t('voice.disconnect')}>
@@ -2661,8 +2897,12 @@ export default function Chat() {
                     <div className={`status-dot ${user.status || 'online'}`} />
                   </div>
                   <div className="popup-info">
-                    <div className="popup-name">{user.username}<span className="user-tag">#{user.tag}</span></div>
-                    <div className="popup-email">{user.email}</div>
+                    <div className={`popup-name copyable-name ${streamerMode ? 'streamer-blur' : ''}`} onClick={(e) => copyUsername(user.username, user.tag, e)} title={copiedName ? '✓ Скопировано!' : 'Нажмите чтобы скопировать'}>{user.username}<span className="user-tag">#{user.tag}</span></div>
+                    <div className="popup-email" onClick={() => {
+                      if (!emailRevealed) { setEmailRevealed(true); setTimeout(() => setEmailRevealed(false), 3000) }
+                    }} title={streamerMode ? 'Скрыто (режим стримера)' : (emailRevealed ? user.email : 'Нажмите чтобы показать')}>
+                      {streamerMode ? <span className="streamer-blur">{user.email}</span> : (<>{emailRevealed ? user.email : <><span className="email-blurred">{user.email.split('@')[0]}</span>@{user.email.split('@')[1]}</>}</>)}
+                    </div>
                     {user.bio && <div className="popup-bio">{user.bio}</div>}
                   </div>
                   <div className="popup-divider" />
@@ -2686,6 +2926,11 @@ export default function Chat() {
                     </button>
                   ))}
                   <div className="popup-divider" />
+                  <button className="popup-action" onClick={() => { const next = !streamerMode; setStreamerMode(next); localStorage.setItem('streamerMode', next) }}>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>{streamerMode && <line x1="1" y1="1" x2="23" y2="23"/>}</svg>
+                    {t('settings.streamerMode')}{streamerMode ? ` — ${t('settings.streamerOn')}` : ''}
+                    <div className={`streamer-indicator ${streamerMode ? 'active' : ''}`} />
+                  </button>
                   <button className="popup-action" onClick={openProfileSettings}>
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
                     {t('settings.profileSettings')}
@@ -2703,7 +2948,7 @@ export default function Chat() {
                     <div className={`status-dot ${user.status || 'online'}`} />
                   </div>
                   <div className="user-panel-text">
-                    <span className="user-panel-name">{user.username}<span className="user-tag">#{user.tag}</span></span>
+                    <span className={`user-panel-name ${streamerMode ? 'streamer-blur' : ''}`}>{user.username}<span className="user-tag">#{user.tag}</span></span>
                     <span className="user-panel-status">{statusLabel(user.status)}</span>
                   </div>
                 </div>
@@ -2745,6 +2990,7 @@ export default function Chat() {
                 </div>
               </div>
             )}
+            <div className="messages-area-wrapper">
             <div className="messages-area" ref={messagesAreaRef} onScroll={handleMessagesScroll} onDrop={handleDrop} onDragOver={handleDragOver}>
               <div className="messages-list">
                 {dmMessages.map((msg, i) => {
@@ -2761,7 +3007,7 @@ export default function Chat() {
                       )}
                       <div className="msg-content">
                         {msg.replyTo && (
-                          <div className="msg-reply-ref" onClick={() => { const el = document.getElementById('msg-' + msg.replyTo.id); if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); el.classList.add('msg-highlight'); setTimeout(() => el.classList.remove('msg-highlight'), 1500) } }}>
+                          <div className="msg-reply-ref" onClick={() => { const el = document.getElementById('msg-' + msg.replyTo.id); if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); el.classList.remove('msg-highlight'); void el.offsetWidth; el.classList.add('msg-highlight'); setTimeout(() => el.classList.remove('msg-highlight'), 2000) } }}>
                             <div className="msg-reply-line" style={{ background: msg.replyTo.user?.avatarColor || 'var(--primary)' }} />
                             <span className="msg-reply-author" style={{ color: msg.replyTo.user?.avatarColor }}>{msg.replyTo.user?.username || 'Deleted User'}</span>
                             <span className="msg-reply-text">{msg.replyTo.content || 'Сообщение удалено'}</span>
@@ -2769,7 +3015,7 @@ export default function Chat() {
                         )}
                         {!isGrouped && (
                           <div className="msg-header">
-                            <span className="msg-author clickable" style={{ color: msg.user?.avatarColor }} onClick={(e) => msg.user && showUserProfile(msg.user, e.clientX, e.clientY)}><span className="msg-author-name">{msg.user?.username}</span><span className="user-tag">#{msg.user?.tag}</span></span>
+                            <span className={`msg-author clickable ${streamerMode && msg.userId === user.id ? 'streamer-blur' : ''}`} style={{ color: msg.user?.avatarColor }} onClick={(e) => msg.user && showUserProfile(msg.user, e.clientX, e.clientY)}><span className="msg-author-name">{msg.user?.username}</span><span className="user-tag">#{msg.user?.tag}</span></span>
                             <span className="msg-time">{formatTime(msg.createdAt)}</span>
                           </div>
                         )}
@@ -2855,6 +3101,7 @@ export default function Chat() {
                 })}
                 <div ref={messagesEndRef} />
               </div>
+            </div>
               {showScrollBtn && (
                 <button className="scroll-bottom-btn" onClick={scrollToBottom} title="Прокрутить вниз">
                   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
@@ -2894,7 +3141,7 @@ export default function Chat() {
                         </button>
                         <button className="attach-menu-item" onClick={() => openFileWith('video/*')}>
                           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>
-                          <span>{t('upload.file')}</span>
+                          <span>{t('upload.video')}</span>
                         </button>
                         <button className="attach-menu-item" onClick={() => openFileWith('')}>
                           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
@@ -2908,8 +3155,10 @@ export default function Chat() {
                     placeholder={`Написать @${activeDM.partner?.username}`}
                     value={input}
                     onChange={e => setInput(e.target.value)}
+                    maxLength={200}
                     autoFocus
                   />
+                  {input.length > 150 && <span className="char-counter" style={{ color: input.length >= 200 ? 'var(--danger)' : 'var(--text-muted)' }}>{input.length}/200</span>}
                   <button type="submit" className="input-btn send-btn" disabled={!input.trim()}>
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg>
                   </button>
@@ -2935,10 +3184,31 @@ export default function Chat() {
                 </div>
               </div>
             </div>
+            {friendsTab === 'all' && (
+              <div className="friends-search-bar">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" strokeWidth="2" strokeLinecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                <input
+                  type="text"
+                  className="friends-search-input"
+                  placeholder={t('friends.searchPlaceholder')}
+                  value={friendsSearch}
+                  onChange={e => setFriendsSearch(e.target.value)}
+                />
+                {friendsSearch && (
+                  <button className="friends-search-clear" onClick={() => setFriendsSearch('')}>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                  </button>
+                )}
+              </div>
+            )}
             <div className="friends-content">
-              {friendsTab === 'all' && (
+              {friendsTab === 'all' && (() => {
+                const filtered = friendsSearch.trim()
+                  ? friends.filter(f => f.username.toLowerCase().includes(friendsSearch.toLowerCase()) || (f.tag && f.tag.includes(friendsSearch)))
+                  : friends
+                return (
                 <div className="friends-list">
-                  {friends.length === 0 ? (
+                  {filtered.length === 0 && !friendsSearch ? (
                     <div className="friends-empty">
                       <div className="friends-empty-icon">
                         <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="url(#emptyGrad)" strokeWidth="1.5">
@@ -2950,10 +3220,15 @@ export default function Chat() {
                       <p>{t('friends.sendRequest')}</p>
                       <button className="btn-submit friends-empty-btn" onClick={() => setFriendsTab('add')}>{t('friends.add')}</button>
                     </div>
+                  ) : filtered.length === 0 && friendsSearch ? (
+                    <div className="friends-empty">
+                      <h4>{t('friends.noResults')}</h4>
+                      <p>«{friendsSearch}»</p>
+                    </div>
                   ) : (
                     <>
-                      <div className="friends-section-label">{t('friends.all')} — {friends.length}</div>
-                      {friends.map(f => (
+                      <div className="friends-section-label">{t('friends.all')} — {filtered.length}</div>
+                      {filtered.map(f => (
                         <div key={f.id} className="friend-item">
                           <div className="friend-item-left">
                             <div className="member-avatar" style={{ background: f.avatarColor }}>
@@ -2988,7 +3263,8 @@ export default function Chat() {
                     </>
                   )}
                 </div>
-              )}
+                )
+              })()}
               {friendsTab === 'pending' && (
                 <div className="friends-list">
                   {friendRequests.length === 0 && outgoingRequests.length === 0 ? (
@@ -3073,6 +3349,17 @@ export default function Chat() {
                           value={friendSearch}
                           onChange={e => { setFriendSearch(e.target.value.replace(/[#\s]/g, '')); setFriendSearchError(''); setFriendSearchResult(null) }}
                           onKeyDown={handleFriendNameKey}
+                          onPaste={e => {
+                            const pasted = e.clipboardData.getData('text')
+                            const match = pasted.match(/^(.+)#(\d{4})$/)
+                            if (match) {
+                              e.preventDefault()
+                              setFriendSearch(match[1])
+                              setFriendTag(match[2])
+                              setFriendSearchError('')
+                              setFriendSearchResult(null)
+                            }
+                          }}
                           autoFocus
                         />
                         <span className="friend-search-hash">#</span>
@@ -3295,9 +3582,14 @@ export default function Chat() {
                             <div className="voice-tile-overlay">
                               <div className="voice-tile-name">{vu.username}</div>
                               <div className="voice-tile-badges">
-                                {isLocal && voiceMuted && (
+                                {(isLocal ? voiceMuted : vu.muted) && (
                                   <div className="voice-tile-badge">
                                     <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="white" strokeWidth="1.5" strokeLinecap="round"><rect x="5" y="1" width="6" height="9" rx="3"/><path d="M3 7v1a5 5 0 0010 0V7"/><line x1="8" y1="13" x2="8" y2="15"/><line x1="13" y1="2" x2="3" y2="14"/></svg>
+                                  </div>
+                                )}
+                                {(isLocal ? voiceDeafened : vu.deafened) && (
+                                  <div className="voice-tile-badge">
+                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round"><path d="M3 14h3a2 2 0 012 2v3a2 2 0 01-2 2H5a2 2 0 01-2-2v-7a9 9 0 0118 0v7a2 2 0 01-2 2h-1a2 2 0 01-2-2v-3a2 2 0 012-2h3"/><line x1="21" y1="3" x2="3" y2="21"/></svg>
                                   </div>
                                 )}
                                 {(isLocal ? screenShareOn : vu.screen) && (
@@ -3352,17 +3644,17 @@ export default function Chat() {
                           <div className="voice-tile-overlay">
                             <div className="voice-tile-name">{vu.username}</div>
                             <div className="voice-tile-badges">
-                              {isLocal && voiceMuted && (
+                              {(isLocal ? voiceMuted : vu.muted) && (
                                 <div className="voice-tile-badge">
                                   <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="white" strokeWidth="1.5" strokeLinecap="round">
                                     <rect x="5" y="1" width="6" height="9" rx="3"/><path d="M3 7v1a5 5 0 0010 0V7"/><line x1="8" y1="13" x2="8" y2="15"/><line x1="13" y1="2" x2="3" y2="14"/>
                                   </svg>
                                 </div>
                               )}
-                              {isLocal && voiceDeafened && (
+                              {(isLocal ? voiceDeafened : vu.deafened) && (
                                 <div className="voice-tile-badge">
-                                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="white" strokeWidth="1.5" strokeLinecap="round">
-                                    <path d="M8 3v8l-3-2.5H2V5.5h3L8 3z"/><path d="M11 6a3 3 0 010 4"/><path d="M13 4.5a5.5 5.5 0 010 7"/><line x1="13" y1="2" x2="3" y2="14"/>
+                                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round">
+                                    <path d="M3 14h3a2 2 0 012 2v3a2 2 0 01-2 2H5a2 2 0 01-2-2v-7a9 9 0 0118 0v7a2 2 0 01-2 2h-1a2 2 0 01-2-2v-3a2 2 0 012-2h3"/><line x1="21" y1="3" x2="3" y2="21"/>
                                   </svg>
                                 </div>
                               )}
@@ -3512,6 +3804,7 @@ export default function Chat() {
               </div>
             )}
             <div className="chat-body" onDrop={handleDrop} onDragOver={handleDragOver}>
+              <div className="messages-area-wrapper">
               <div className="messages-area" ref={messagesAreaRef} onScroll={handleMessagesScroll}>
                 <div className="messages-list">
                   {groupedMessages.length === 0 && (
@@ -3546,7 +3839,7 @@ export default function Chat() {
                         )}
                         <div className="msg-content">
                           {msg.replyTo && (
-                            <div className="msg-reply-ref" onClick={() => { const el = document.getElementById('msg-' + msg.replyTo.id); if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); el.classList.add('msg-highlight'); setTimeout(() => el.classList.remove('msg-highlight'), 1500) } }}>
+                            <div className="msg-reply-ref" onClick={() => { const el = document.getElementById('msg-' + msg.replyTo.id); if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); el.classList.remove('msg-highlight'); void el.offsetWidth; el.classList.add('msg-highlight'); setTimeout(() => el.classList.remove('msg-highlight'), 2000) } }}>
                               <div className="msg-reply-line" style={{ background: msg.replyTo.user?.avatarColor || 'var(--primary)' }} />
                               <span className="msg-reply-author" style={{ color: msg.replyTo.user?.avatarColor }}>{msg.replyTo.user?.username || 'Deleted User'}</span>
                               <span className="msg-reply-text">{msg.replyTo.content || 'Сообщение удалено'}</span>
@@ -3554,7 +3847,7 @@ export default function Chat() {
                           )}
                           {!isGrouped && (
                             <div className="msg-header">
-                              <span className="msg-author clickable" style={{ color: msg.user.avatarColor }} onClick={(e) => showUserProfile(msg.user, e.clientX, e.clientY)}><span className="msg-author-name">{msg.user.username}</span><span className="user-tag">#{msg.user.tag}</span></span>
+                              <span className={`msg-author clickable ${streamerMode && msg.userId === user.id ? 'streamer-blur' : ''}`} style={{ color: msg.user.avatarColor }} onClick={(e) => showUserProfile(msg.user, e.clientX, e.clientY)}><span className="msg-author-name">{msg.user.username}</span><span className="user-tag">#{msg.user.tag}</span></span>
                               <span className="msg-time">{formatTime(msg.createdAt)}</span>
                             </div>
                           )}
@@ -3608,6 +3901,7 @@ export default function Chat() {
                     <span>{typingUsers.map(u => u.username).join(', ')} {typingUsers.length === 1 ? t('typing.one') : t('typing.many')}</span>
                   </div>
                 )}
+              </div>
                 {showScrollBtn && (
                   <button className="scroll-bottom-btn" onClick={scrollToBottom} title="Прокрутить вниз">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
@@ -3620,12 +3914,14 @@ export default function Chat() {
                     <>
                       <div className="members-category">{t('members.online')} — {onlineMembers.length}</div>
                       {onlineMembers.map(m => (
-                        <div key={m.id} className="member-item">
+                        <div key={m.id} className="member-item" onContextMenu={e => { if ((hasServerPerm('kickMembers') || hasServerPerm('manageRoles')) && m.id !== user.id) { e.preventDefault(); setMemberCtx({ member: m, x: e.clientX, y: e.clientY }) } }}>
                           <div className="member-avatar" style={{ background: m.avatarColor }}>
                             {m.username[0].toUpperCase()}
                             <div className={`status-dot ${m.status}`} />
                           </div>
-                          <span>{m.username}<span className="user-tag">#{m.tag}</span></span>
+                          <span className={streamerMode && m.id === user.id ? 'streamer-blur' : ''}>{m.username}<span className="user-tag">#{m.tag}</span></span>
+                          {m.role === 'owner' && <span className="role-badge owner" title="Владелец">👑</span>}
+                          {m.role === 'admin' && <span className="role-badge admin" title="Админ">🛡️</span>}
                         </div>
                       ))}
                     </>
@@ -3634,12 +3930,14 @@ export default function Chat() {
                     <>
                       <div className="members-category">{t('members.offline')} — {offlineMembers.length}</div>
                       {offlineMembers.map(m => (
-                        <div key={m.id} className="member-item offline">
+                        <div key={m.id} className="member-item offline" onContextMenu={e => { if ((hasServerPerm('kickMembers') || hasServerPerm('manageRoles')) && m.id !== user.id) { e.preventDefault(); setMemberCtx({ member: m, x: e.clientX, y: e.clientY }) } }}>
                           <div className="member-avatar" style={{ background: m.avatarColor, opacity: 0.4 }}>
                             {m.username[0].toUpperCase()}
                             <div className="status-dot" />
                           </div>
-                          <span>{m.username}<span className="user-tag">#{m.tag}</span></span>
+                          <span className={streamerMode && m.id === user.id ? 'streamer-blur' : ''}>{m.username}<span className="user-tag">#{m.tag}</span></span>
+                          {m.role === 'owner' && <span className="role-badge owner" title="Владелец">👑</span>}
+                          {m.role === 'admin' && <span className="role-badge admin" title="Админ">🛡️</span>}
                         </div>
                       ))}
                     </>
@@ -3674,7 +3972,7 @@ export default function Chat() {
                       </button>
                       <button className="attach-menu-item" onClick={() => openFileWith('video/*')}>
                         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>
-                        <span>{t('upload.file')}</span>
+                        <span>{t('upload.video')}</span>
                       </button>
                       <button className="attach-menu-item" onClick={() => openFileWith('')}>
                         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
@@ -3688,8 +3986,10 @@ export default function Chat() {
                   placeholder={slowmodeCooldown > 0 ? `${t('slowmode.wait')} ${slowmodeCooldown} ${t('slowmode.sec')}` : `${t('msg.typePlaceholder')}`}
                   value={input}
                   onChange={handleInput}
+                  maxLength={200}
                   autoFocus
                 />
+                {input.length > 150 && <span className="char-counter" style={{ color: input.length >= 200 ? 'var(--danger)' : 'var(--text-muted)' }}>{input.length}/200</span>}
                 {activeChannel.slowmode > 0 && (() => {
                   const isOwner = activeServer && activeServer.ownerId === user.id
                   const sm = activeChannel.slowmode
@@ -3764,6 +4064,42 @@ export default function Chat() {
           )}
         </div>
       )}
+
+      {/* Member context menu */}
+      {memberCtx && (
+        <div className="msg-ctx-menu" style={{ top: memberCtx.y, left: memberCtx.x }} onClick={e => e.stopPropagation()}>
+          <div className="ctx-header">{memberCtx.member.username}</div>
+          <button className="ctx-item" onClick={() => { showUserProfile(memberCtx.member, memberCtx.x, memberCtx.y); setMemberCtx(null) }}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+            <span>Профиль</span>
+          </button>
+          <button className="ctx-item" onClick={() => { openDM(memberCtx.member.id); setMemberCtx(null) }}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
+            <span>Написать</span>
+          </button>
+          {hasServerPerm('manageRoles') && memberCtx.member.role !== 'owner' && (<>
+            <div className="ctx-divider" />
+            {memberCtx.member.role === 'admin' ? (
+              <button className="ctx-item ctx-danger" onClick={() => toggleMemberRole(memberCtx.member.id, 'admin')}>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><line x1="9" y1="9" x2="15" y2="15"/><line x1="15" y1="9" x2="9" y2="15"/></svg>
+                <span>Снять админку</span>
+              </button>
+            ) : (
+              <button className="ctx-item" onClick={() => toggleMemberRole(memberCtx.member.id, 'user')}>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                <span>Дать админку</span>
+              </button>
+            )}
+          </>)}
+          {hasServerPerm('kickMembers') && memberCtx.member.role !== 'owner' && (
+            <button className="ctx-item ctx-danger" onClick={() => { kickMember(memberCtx.member.id); setMemberCtx(null) }}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M16 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="18" y1="11" x2="23" y2="11"/></svg>
+              <span>Кикнуть</span>
+            </button>
+          )}
+        </div>
+      )}
+      {memberCtx && <div className="ctx-overlay" onClick={() => setMemberCtx(null)} />}
 
       {/* Pin choice popup */}
       {pinChoiceCtx && (
@@ -3886,7 +4222,7 @@ export default function Chat() {
                       <div className={`status-dot ${user.status || 'online'}`} />
                     </div>
                     <div className="profile-preview-info">
-                      <span className="profile-preview-name">{profileForm.username || user.username}<span className="user-tag">#{user.tag}</span></span>
+                      <span className={`profile-preview-name ${streamerMode ? 'streamer-blur' : ''}`}>{profileForm.username || user.username}<span className="user-tag">#{user.tag}</span></span>
                       <span className="profile-preview-status">{statusLabel(user.status)}</span>
                     </div>
                   </div>
@@ -4008,11 +4344,15 @@ export default function Chat() {
               <span className="upload-file-name">{uploadFileObj.name}</span>
               <span className="upload-file-size">{formatFileSize(uploadFileObj.size)}</span>
             </div>
-            {uploadFileObj.type.startsWith('image/') && (
+            {(uploadFileObj.type.startsWith('image/') || uploadFileObj.type.startsWith('video/')) && (
               <div className="upload-send-as">
                 <button className={`send-as-btn ${uploadSendAs === 'photo' ? 'active' : ''}`} onClick={() => setUploadSendAs('photo')}>
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21,15 16,10 5,21"/></svg>
-                  {t('upload.photo')}
+                  {uploadFileObj.type.startsWith('video/') ? (
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>
+                  ) : (
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21,15 16,10 5,21"/></svg>
+                  )}
+                  {uploadFileObj.type.startsWith('video/') ? t('upload.video') : t('upload.photo')}
                 </button>
                 <button className={`send-as-btn ${uploadSendAs === 'file' ? 'active' : ''}`} onClick={() => setUploadSendAs('file')}>
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14,2 14,8 20,8"/></svg>
@@ -4117,41 +4457,140 @@ export default function Chat() {
       )}
 
       {/* Server settings modal */}
-      {showServerSettings && activeServer && (
-        <div className="modal-overlay" onClick={() => setShowServerSettings(false)}>
-          <div className="modal" onClick={e => e.stopPropagation()}>
-            <h3>{t('server.settings')}</h3>
-            <form onSubmit={async (e) => {
-              e.preventDefault()
-              try {
-                const updated = await API(`/api/servers/${activeServer.id}`, { method: 'PUT', body: JSON.stringify({ name: serverSettingsName }) })
-                setServers(prev => prev.map(s => s.id === updated.id ? { ...s, ...updated } : s))
-                setActiveServer(prev => prev && prev.id === updated.id ? { ...prev, ...updated } : prev)
-                setShowServerSettings(false)
-              } catch {}
-            }}>
-              <div className="field">
-                <label>{t('server.name')}</label>
-                <input type="text" value={serverSettingsName} onChange={e => setServerSettingsName(e.target.value)} autoFocus required />
+      {showServerSettings && activeServer && (() => {
+        const isOwner = activeServer.ownerId === user.id
+        const myMember = members.find(m => m.id === user.id)
+        const isAdmin = myMember?.role === 'admin'
+        const perms = activeServer.adminPermissions || {}
+        const canManageRoles = isOwner || (isAdmin && perms.manageRoles)
+        return (
+        <div className="modal-overlay" onClick={() => { setShowServerSettings(false); setServerSettingsTab('general'); setMemberSearchQuery('') }}>
+          <div className="settings-panel" onClick={e => e.stopPropagation()}>
+            <button className="settings-close" onClick={() => { setShowServerSettings(false); setServerSettingsTab('general'); setMemberSearchQuery('') }}>&times;</button>
+            <div className="settings-layout">
+              <div className="settings-sidebar">
+                <div className="settings-sidebar-title">{activeServer.name}</div>
+                <button className={`settings-nav-item ${serverSettingsTab === 'general' ? 'active' : ''}`} onClick={() => setServerSettingsTab('general')}>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+                  Общее
+                </button>
+                <button className={`settings-nav-item ${serverSettingsTab === 'members' ? 'active' : ''}`} onClick={() => setServerSettingsTab('members')}>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>
+                  Участники
+                </button>
+                {isOwner && (
+                  <button className={`settings-nav-item ${serverSettingsTab === 'permissions' ? 'active' : ''}`} onClick={() => setServerSettingsTab('permissions')}>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                    Права админов
+                  </button>
+                )}
               </div>
-              <div className="settings-info">
-                <div className="settings-info-row">
-                  <span className="settings-label">{t('server.id')}</span>
-                  <span className="settings-value copyable" onClick={() => navigator.clipboard.writeText(activeServer.id)}>{activeServer.id}</span>
-                </div>
-                <div className="settings-info-row">
-                  <span className="settings-label">{t('server.owner')}</span>
-                  <span className="settings-value">{activeServer.ownerId === user.id ? t('server.ownerYou') : t('server.ownerOther')}</span>
-                </div>
+              <div className="settings-content">
+                {serverSettingsTab === 'general' && (
+                  <div>
+                    <h3>Общие настройки</h3>
+                    <form onSubmit={async (e) => {
+                      e.preventDefault()
+                      try {
+                        const updated = await API(`/api/servers/${activeServer.id}`, { method: 'PUT', body: JSON.stringify({ name: serverSettingsName }) })
+                        setServers(prev => prev.map(s => s.id === updated.id ? { ...s, ...updated } : s))
+                        setActiveServer(prev => prev && prev.id === updated.id ? { ...prev, ...updated } : prev)
+                        setShowServerSettings(false)
+                        setServerSettingsTab('general')
+                      } catch {}
+                    }}>
+                      <div className="field">
+                        <label>{t('server.name')}</label>
+                        <input type="text" value={serverSettingsName} onChange={e => setServerSettingsName(e.target.value)} autoFocus required />
+                      </div>
+                      <div className="settings-info">
+                        <div className="settings-info-row">
+                          <span className="settings-label">{t('server.id')}</span>
+                          <span className="settings-value copyable" onClick={() => navigator.clipboard.writeText(activeServer.id)}>{activeServer.id}</span>
+                        </div>
+                        <div className="settings-info-row">
+                          <span className="settings-label">{t('server.owner')}</span>
+                          <span className="settings-value">{isOwner ? t('server.ownerYou') : t('server.ownerOther')}</span>
+                        </div>
+                      </div>
+                      {isOwner && <div className="modal-actions"><button type="submit" className="btn-submit">{t('common.save')}</button></div>}
+                    </form>
+                  </div>
+                )}
+                {serverSettingsTab === 'members' && (
+                  <div>
+                    <h3>Участники — {members.length}</h3>
+                    <div className="srv-members-search">
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                      <input type="text" placeholder="Поиск участников..." value={memberSearchQuery} onChange={e => setMemberSearchQuery(e.target.value)} />
+                    </div>
+                    <div className="srv-members-list">
+                      {members.filter(m => !memberSearchQuery || m.username.toLowerCase().includes(memberSearchQuery.toLowerCase())).map(m => {
+                        const mRole = activeServer.ownerId === m.id ? 'owner' : (m.role || 'user')
+                        return (
+                          <div key={m.id} className="srv-member-row">
+                            <div className="srv-member-avatar" style={{ background: m.avatarColor }}>{m.username[0].toUpperCase()}</div>
+                            <div className="srv-member-info">
+                              <span className="srv-member-name">{m.username}<span className="user-tag">#{m.tag || '0000'}</span></span>
+                              <span className={`role-badge role-${mRole}`}>{mRole === 'owner' ? '👑 Владелец' : mRole === 'admin' ? '🛡️ Админ' : 'Участник'}</span>
+                            </div>
+                            {canManageRoles && m.id !== user.id && mRole !== 'owner' && (
+                              <div className="srv-member-actions">
+                                {['user', 'admin'].map(r => (
+                                  <button key={r} className={`srv-role-btn ${mRole === r ? 'active-role-' + r : ''}`} onClick={async () => {
+                                    if (mRole === r) return
+                                    try {
+                                      await API(`/api/servers/${activeServer.id}/members/${m.id}/role`, { method: 'POST', body: JSON.stringify({ role: r }) })
+                                      setMembers(prev => prev.map(mm => mm.id === m.id ? { ...mm, role: r } : mm))
+                                    } catch {}
+                                  }}>{r === 'admin' ? '🛡️ Админ' : 'Участник'}</button>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
+                )}
+                {serverSettingsTab === 'permissions' && isOwner && (
+                  <div>
+                    <h3>Права администраторов</h3>
+                    <p className="perms-desc">Настройте, какие действия могут выполнять администраторы на этом сервере.</p>
+                    {[
+                      { key: 'deleteMessages', label: 'Удалять чужие сообщения', desc: 'Админы смогут удалять сообщения других участников' },
+                      { key: 'deleteChannels', label: 'Удалять каналы', desc: 'Админы смогут удалять каналы на сервере' },
+                      { key: 'createChannels', label: 'Создавать каналы', desc: 'Админы смогут создавать новые каналы' },
+                      { key: 'kickMembers', label: 'Кикать участников', desc: 'Админы смогут выгонять участников с сервера' },
+                      { key: 'manageRoles', label: 'Управлять ролями', desc: 'Админы смогут назначать и снимать роли' },
+                      { key: 'bypassSlowmode', label: 'Обход медленного режима', desc: 'Админы не будут ограничены медленным режимом' },
+                    ].map(p => (
+                      <div key={p.key} className="perm-toggle-row">
+                        <div className="perm-toggle-info">
+                          <div className="perm-toggle-label">{p.label}</div>
+                          <div className="perm-toggle-desc">{p.desc}</div>
+                        </div>
+                        <label className="toggle-switch">
+                          <input type="checkbox" checked={!!perms[p.key]} onChange={async (e) => {
+                            const newPerms = { ...perms, [p.key]: e.target.checked }
+                            try {
+                              await API(`/api/servers/${activeServer.id}/permissions`, { method: 'PUT', body: JSON.stringify(newPerms) })
+                              setActiveServer(prev => prev ? { ...prev, adminPermissions: newPerms } : prev)
+                              setServers(prev => prev.map(s => s.id === activeServer.id ? { ...s, adminPermissions: newPerms } : s))
+                            } catch {}
+                          }} />
+                          <span className="toggle-slider" />
+                        </label>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
-              <div className="modal-actions">
-                <button type="button" className="btn-cancel" onClick={() => setShowServerSettings(false)}>{t('common.cancel')}</button>
-                {activeServer.ownerId === user.id && <button type="submit" className="btn-submit">{t('common.save')}</button>}
-              </div>
-            </form>
+            </div>
           </div>
         </div>
-      )}
+        )
+      })()}
 
       {/* Channel settings modal */}
       {showChannelSettings && (
@@ -4294,7 +4733,9 @@ export default function Chat() {
             <div className="invite-friends-list">
               {friends.length === 0 ? (
                 <div className="invite-empty">{t('invite.noFriends')}</div>
-              ) : friends.map(f => (
+              ) : friends.map(f => {
+                const alreadyMember = (showInviteModal.memberIds || []).includes(f.id)
+                return (
                 <div key={f.id} className="invite-friend-item">
                   <div className="invite-friend-left">
                     <div className="member-avatar" style={{ background: f.avatarColor }}>
@@ -4303,15 +4744,23 @@ export default function Chat() {
                     </div>
                     <span className="invite-friend-name">{f.username}<span className="user-tag">#{f.tag}</span></span>
                   </div>
-                  <button
-                    className={`btn-invite ${inviteSending[f.id] === 'done' ? 'sent' : ''}`}
-                    disabled={!!inviteSending[f.id]}
-                    onClick={() => sendInvite(showInviteModal.serverId, f.id)}
-                  >
-                    {inviteSending[f.id] === 'done' ? t('invite.sent') : inviteSending[f.id] === true ? '...' : inviteSending[f.id] === 'error' ? t('invite.alreadyMember') : t('invite.send')}
-                  </button>
+                  {alreadyMember ? (
+                    <span className="invite-already-member">
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M20 6L9 17l-5-5"/></svg>
+                      {t('invite.alreadyOnServer')}
+                    </span>
+                  ) : (
+                    <button
+                      className={`btn-invite ${inviteSending[f.id] === 'done' ? 'sent' : ''}`}
+                      disabled={!!inviteSending[f.id]}
+                      onClick={() => sendInvite(showInviteModal.serverId, f.id)}
+                    >
+                      {inviteSending[f.id] === 'done' ? t('invite.sent') : inviteSending[f.id] === true ? '...' : inviteSending[f.id] === 'error' ? t('invite.alreadyMember') : t('invite.send')}
+                    </button>
+                  )}
                 </div>
-              ))}
+                )
+              })}
             </div>
             <div className="modal-actions">
               <button className="btn-cancel" onClick={() => setShowInviteModal(null)}>{t('common.close')}</button>
@@ -4407,6 +4856,7 @@ export default function Chat() {
 
       {/* Hidden container for WebRTC audio elements */}
       <div id="voice-audio-container" style={{ display: 'none' }} />
+      {copyTooltip && <div className="copy-toast" style={{ left: copyTooltip.x, top: copyTooltip.y }}>Скопировано!</div>}
     </div>
   )
 }

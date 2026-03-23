@@ -51,6 +51,8 @@ const translations = {
     'friends.call': 'Позвонить',
     'friends.block': 'Заблокировать',
     'friends.noFriends': 'У вас пока нет друзей',
+    'friends.searchPlaceholder': 'Поиск по имени или тегу',
+    'friends.noResults': 'Ничего не найдено',
     'friends.noOnline': 'Нет друзей в сети',
     'friends.noPending': 'Нет ожидающих запросов',
     'friends.incoming': 'Входящий запрос',
@@ -169,6 +171,7 @@ const translations = {
     // Upload
     'upload.title': 'Загрузка файла',
     'upload.photo': 'Фото',
+    'upload.video': 'Видео',
     'upload.file': 'Файл',
     'upload.comment': 'Добавить комментарий (опционально)',
     'upload.btn': 'Загрузить',
@@ -194,6 +197,10 @@ const translations = {
     'settings.themeDark': 'Тёмная',
     'settings.themeLight': 'Светлая',
     'settings.accentColor': 'Акцентный цвет',
+    'settings.streamerMode': 'Режим стримера',
+    'settings.streamerModeDesc': 'Скрывает личные данные (имя, тег, email) для безопасности при трансляции',
+    'settings.streamerOn': 'Включён',
+    'settings.streamerOff': 'Выключен',
     'settings.logout': 'Выйти',
     'settings.profileSettings': 'Настройки профиля',
     'settings.appSettings': 'Настройки приложения',
@@ -205,6 +212,7 @@ const translations = {
     'invite.send': 'Пригласить',
     'invite.sent': 'Отправлено',
     'invite.alreadyMember': 'Уже на сервере',
+    'invite.alreadyOnServer': 'Уже на сервере',
     'invite.close': 'Закрыть',
 
     // Confirm
@@ -217,6 +225,7 @@ const translations = {
     'common.create': 'Создать',
     'common.close': 'Закрыть',
     'common.search': 'Поиск',
+    'common.store': 'Магазин',
     'common.loading': 'Загрузка...',
 
     // Typing
@@ -302,6 +311,8 @@ const translations = {
     'friends.call': 'Call',
     'friends.block': 'Block',
     'friends.noFriends': 'No friends yet',
+    'friends.searchPlaceholder': 'Search by name or tag',
+    'friends.noResults': 'No results found',
     'friends.noOnline': 'No friends online',
     'friends.noPending': 'No pending requests',
     'friends.incoming': 'Incoming request',
@@ -413,6 +424,7 @@ const translations = {
 
     'upload.title': 'Upload File',
     'upload.photo': 'Photo',
+    'upload.video': 'Video',
     'upload.file': 'File',
     'upload.comment': 'Add a comment (optional)',
     'upload.btn': 'Upload',
@@ -437,6 +449,10 @@ const translations = {
     'settings.themeDark': 'Dark',
     'settings.themeLight': 'Light',
     'settings.accentColor': 'Accent Color',
+    'settings.streamerMode': 'Streamer Mode',
+    'settings.streamerModeDesc': 'Hides personal info (name, tag, email) for safety while streaming',
+    'settings.streamerOn': 'Enabled',
+    'settings.streamerOff': 'Disabled',
     'settings.logout': 'Log Out',
     'settings.profileSettings': 'Profile Settings',
     'settings.appSettings': 'App Settings',
@@ -447,6 +463,7 @@ const translations = {
     'invite.send': 'Invite',
     'invite.sent': 'Sent',
     'invite.alreadyMember': 'Already a member',
+    'invite.alreadyOnServer': 'Already on server',
     'invite.close': 'Close',
 
     'confirm.cancel': 'Cancel',
@@ -457,6 +474,7 @@ const translations = {
     'common.create': 'Create',
     'common.close': 'Close',
     'common.search': 'Search',
+    'common.store': 'Store',
     'common.loading': 'Loading...',
 
     'typing.one': 'is typing...',
@@ -538,6 +556,8 @@ const translations = {
     'friends.call': '通话',
     'friends.block': '屏蔽',
     'friends.noFriends': '还没有好友',
+    'friends.searchPlaceholder': '按名称或标签搜索',
+    'friends.noResults': '未找到结果',
     'friends.noOnline': '没有在线好友',
     'friends.noPending': '没有待处理的请求',
     'friends.incoming': '收到的请求',
@@ -649,6 +669,7 @@ const translations = {
 
     'upload.title': '上传文件',
     'upload.photo': '照片',
+    'upload.video': '视频',
     'upload.file': '文件',
     'upload.comment': '添加评论（可选）',
     'upload.btn': '上传',
@@ -673,6 +694,10 @@ const translations = {
     'settings.themeDark': '深色',
     'settings.themeLight': '浅色',
     'settings.accentColor': '强调色',
+    'settings.streamerMode': '主播模式',
+    'settings.streamerModeDesc': '在直播时隐藏个人信息（用户名、标签、邮箱）',
+    'settings.streamerOn': '已开启',
+    'settings.streamerOff': '已关闭',
     'settings.logout': '退出登录',
     'settings.profileSettings': '个人资料设置',
     'settings.appSettings': '应用设置',
@@ -683,6 +708,7 @@ const translations = {
     'invite.send': '邀请',
     'invite.sent': '已发送',
     'invite.alreadyMember': '已是成员',
+    'invite.alreadyOnServer': '已在服务器中',
     'invite.close': '关闭',
 
     'confirm.cancel': '取消',
@@ -693,6 +719,7 @@ const translations = {
     'common.create': '创建',
     'common.close': '关闭',
     'common.search': '搜索',
+    'common.store': '商店',
     'common.loading': '加载中...',
 
     'typing.one': '正在输入...',
