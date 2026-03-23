@@ -1420,7 +1420,7 @@ io.on('connection', (socket) => {
         const ch = db.channels.find(c => c.id === chId);
         if (ch) io.to('server:' + ch.serverId).emit('voice-state-update', { channelId: chId, users: getVoiceUsers(chId) });
         // Sound notification for others
-        socket.to('voice:' + chId).emit('voice-sound', { type: 'mute', userId: uid });
+        socket.to('voice:' + chId).emit('voice-sound', { type: muted ? 'mute' : 'unmute', userId: uid });
         break;
       }
     }

@@ -639,13 +639,12 @@ export default function Chat() {
       gain.connect(ctx.destination)
       const vol = (soundVolume / 100) * 0.15
       if (type === 'message-send') {
-        osc.type = 'sine'
-        osc.frequency.setValueAtTime(880, ctx.currentTime)
-        osc.frequency.exponentialRampToValueAtTime(1320, ctx.currentTime + 0.08)
-        gain.gain.setValueAtTime(vol, ctx.currentTime)
-        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.15)
-        osc.start(ctx.currentTime)
-        osc.stop(ctx.currentTime + 0.15)
+        osc.stop()
+        ctx.close()
+        const a = new Audio('/sound_send.wav')
+        a.volume = Math.min(soundVolume / 100, 1)
+        a.play().catch(() => {})
+        return
       } else if (type === 'message-receive') {
         osc.type = 'sine'
         osc.frequency.setValueAtTime(587, ctx.currentTime)
@@ -960,7 +959,7 @@ export default function Chat() {
 
     socket.on('voice-sound', ({ type }) => {
       const vol = 0.8
-      const a = new Audio(type === 'join' ? '/voice_connect.wav' : type === 'leave' ? '/voice_disconnect.wav' : '/mute_toggle.m4a')
+      const a = new Audio(type === 'join' ? '/voice_connect.wav' : type === 'leave' ? '/voice_disconnect.wav' : type === 'unmute' ? '/unmute.wav' : '/mute_toggle.m4a')
       a.volume = vol
       a.play().catch(() => {})
     })
@@ -1124,7 +1123,7 @@ export default function Chat() {
   const toggleVoiceMute = async () => {
     const newMuted = !voiceMuted
     if (!localStream.current) {
-      if (newMuted) { setVoiceMuted(true); playVoiceSound('/mute_toggle.m4a', 0.8); return }
+      if (newMuted) { setVoiceMuted(true); playVoiceSound('/mute_toggle.m4a', 0.8); socketRef.current?.emit('voice-mute-state', { muted: true, deafened: voiceDeafened }); return }
       // Try to get mic if we didn't have it before
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: selectedMicId ? { deviceId: { exact: selectedMicId } } : true })
@@ -1135,7 +1134,7 @@ export default function Chat() {
           stream.getAudioTracks().forEach(track => pc.addTrack(track, stream))
         }
         setVoiceMuted(false)
-        playVoiceSound('/mute_toggle.m4a', 0.8)
+        playVoiceSound('/unmute.wav', 0.8)
         return
       } catch { setVoiceMuted(!voiceMuted); return }
     }
@@ -1144,7 +1143,7 @@ export default function Chat() {
       audioTrack.enabled = !newMuted
     }
     setVoiceMuted(newMuted)
-    playVoiceSound('/mute_toggle.m4a', 0.8)
+    playVoiceSound(newMuted ? '/mute_toggle.m4a' : '/unmute.wav', 0.8)
     socketRef.current?.emit('voice-mute-state', { muted: newMuted, deafened: voiceDeafened })
   }
 
@@ -1153,7 +1152,7 @@ export default function Chat() {
     const newDeafened = !voiceDeafened
     audios.forEach(a => { a.muted = newDeafened })
     setVoiceDeafened(newDeafened)
-    playVoiceSound('/mute_toggle.m4a', 0.8)
+    playVoiceSound(newDeafened ? '/mute_toggle.m4a' : '/unmute.wav', 0.8)
     if (newDeafened) {
       // Deafen also mutes mic
       if (localStream.current) {
