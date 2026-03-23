@@ -604,6 +604,11 @@ export default function Chat() {
   const [selectedCameraId, setSelectedCameraId] = useState('')
   const [micVolume, setMicVolume] = useState(100)
   const [soundVolume, setSoundVolume] = useState(100)
+  const [userVolumes, setUserVolumes] = useState({}) // userId -> volume (0-200)
+  const [voiceUserCtx, setVoiceUserCtx] = useState(null) // { user, x, y }
+  const voiceUserCtxRef = useRef(null)
+  const micGainNode = useRef(null)
+  const micAudioCtx = useRef(null)
   const [cameraOn, setCameraOn] = useState(false)
   const [screenShareOn, setScreenShareOn] = useState(false)
   const cameraStream = useRef(null)
@@ -953,6 +958,13 @@ export default function Chat() {
       // The actual stream removal happens via ontrack/track.onended
     })
 
+    socket.on('voice-sound', ({ type }) => {
+      const vol = 0.8
+      const a = new Audio(type === 'join' ? '/voice_connect.wav' : type === 'leave' ? '/voice_disconnect.wav' : '/mute_toggle.m4a')
+      a.volume = vol
+      a.play().catch(() => {})
+    })
+
     return () => { socket?.disconnect() }
   }, [])
 
@@ -1006,9 +1018,13 @@ export default function Chat() {
         audio.srcObject = e.streams[0]
         audio.autoplay = true
         audio.id = 'voice-audio-' + targetSocketId
+        const remoteUserId = pc._remoteUserId
+        audio._remoteUserId = remoteUserId
+        // Apply per-user volume
+        const uVol = remoteUserId && userVolumes[remoteUserId] !== undefined ? userVolumes[remoteUserId] : 100
+        audio.volume = Math.min((soundVolume / 100) * (uVol / 100), 2)
         document.getElementById('voice-audio-container')?.appendChild(audio)
         // Detect speaking from remote stream
-        const remoteUserId = pc._remoteUserId
         if (remoteUserId) {
           const det = startSpeakingDetection(e.streams[0], remoteUserId)
           if (det) speakingAnalysers.current[targetSocketId] = det
@@ -1030,13 +1046,27 @@ export default function Chat() {
     return pc
   }
 
+  const playVoiceSound = (src, volume = 1) => { const a = new Audio(src); a.volume = Math.min(volume, 1); a.play().catch(() => {}) }
+
   const joinVoiceChannel = async (channel) => {
     if (voiceChannel?.id === channel.id) return
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false })
-      localStream.current = stream
-      // Detect local speaking
-      const det = startSpeakingDetection(stream, user.id)
+      const rawStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false })
+      // Route through GainNode for mic volume control
+      const ctx = new AudioContext()
+      const source = ctx.createMediaStreamSource(rawStream)
+      const gain = ctx.createGain()
+      gain.gain.value = micVolume / 100
+      const dest = ctx.createMediaStreamDestination()
+      source.connect(gain)
+      gain.connect(dest)
+      micAudioCtx.current = ctx
+      micGainNode.current = gain
+      localStream.current = dest.stream
+      // Keep raw stream ref to stop tracks later
+      localStream.current._rawStream = rawStream
+      // Detect local speaking from raw stream
+      const det = startSpeakingDetection(rawStream, user.id)
       if (det) localSpeakingRef.current = det
     } catch (err) {
       console.warn('Mic not available, joining voice channel without mic', err)
@@ -1051,7 +1081,7 @@ export default function Chat() {
     setScreenShareOn(false)
     loadDevices()
     socket.emit('voice-join', { channelId: channel.id })
-    new Audio('/connect_soft.mp3').play().catch(() => {})
+    playVoiceSound('/voice_connect.wav', 0.8)
   }
 
   const leaveVoiceChannel = () => {
@@ -1070,9 +1100,12 @@ export default function Chat() {
     peerConnections.current = {}
     // Stop local stream
     if (localStream.current) {
+      if (localStream.current._rawStream) localStream.current._rawStream.getTracks().forEach(t => t.stop())
       localStream.current.getTracks().forEach(t => t.stop())
       localStream.current = null
     }
+    if (micAudioCtx.current) { micAudioCtx.current.close().catch(() => {}); micAudioCtx.current = null }
+    micGainNode.current = null
     // Stop camera/screen
     if (cameraStream.current) { cameraStream.current.getTracks().forEach(t => t.stop()); cameraStream.current = null }
     if (screenStream.current) { screenStream.current.getTracks().forEach(t => t.stop()); screenStream.current = null }
@@ -1085,13 +1118,13 @@ export default function Chat() {
     setShowCameraPopup(false)
     setVoiceChannel(null)
     setVoiceViewChannel(null)
-    new Audio('/disconnect_soft.mp3').play().catch(() => {})
+    playVoiceSound('/voice_disconnect.wav', 0.8)
   }
 
   const toggleVoiceMute = async () => {
     const newMuted = !voiceMuted
     if (!localStream.current) {
-      if (newMuted) { setVoiceMuted(true); return }
+      if (newMuted) { setVoiceMuted(true); playVoiceSound('/mute_toggle.m4a', 0.8); return }
       // Try to get mic if we didn't have it before
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: selectedMicId ? { deviceId: { exact: selectedMicId } } : true })
@@ -1102,6 +1135,7 @@ export default function Chat() {
           stream.getAudioTracks().forEach(track => pc.addTrack(track, stream))
         }
         setVoiceMuted(false)
+        playVoiceSound('/mute_toggle.m4a', 0.8)
         return
       } catch { setVoiceMuted(!voiceMuted); return }
     }
@@ -1110,6 +1144,7 @@ export default function Chat() {
       audioTrack.enabled = !newMuted
     }
     setVoiceMuted(newMuted)
+    playVoiceSound('/mute_toggle.m4a', 0.8)
     socketRef.current?.emit('voice-mute-state', { muted: newMuted, deafened: voiceDeafened })
   }
 
@@ -1118,6 +1153,7 @@ export default function Chat() {
     const newDeafened = !voiceDeafened
     audios.forEach(a => { a.muted = newDeafened })
     setVoiceDeafened(newDeafened)
+    playVoiceSound('/mute_toggle.m4a', 0.8)
     if (newDeafened) {
       // Deafen also mutes mic
       if (localStream.current) {
@@ -1201,11 +1237,8 @@ export default function Chat() {
   // Apply mic volume (gain)
   const applyMicVolume = (vol) => {
     setMicVolume(vol)
-    if (localStream.current) {
-      const track = localStream.current.getAudioTracks()[0]
-      if (track && track.applyConstraints) {
-        // Use gain via AudioContext approach
-      }
+    if (micGainNode.current) {
+      micGainNode.current.gain.value = vol / 100
     }
   }
 
@@ -1213,7 +1246,22 @@ export default function Chat() {
   const applySoundVolume = (vol) => {
     setSoundVolume(vol)
     const audios = document.querySelectorAll('#voice-audio-container audio')
-    audios.forEach(a => { a.volume = vol / 100 })
+    audios.forEach(a => {
+      const uid = a._remoteUserId
+      const userVol = uid && userVolumes[uid] !== undefined ? userVolumes[uid] : 100
+      a.volume = Math.min((vol / 100) * (userVol / 100), 2)
+    })
+  }
+
+  const applyUserVolume = (userId, vol) => {
+    setUserVolumes(prev => ({ ...prev, [userId]: vol }))
+    // Find the audio element for this user and apply
+    const audios = document.querySelectorAll('#voice-audio-container audio')
+    audios.forEach(a => {
+      if (a._remoteUserId === userId) {
+        a.volume = Math.min((soundVolume / 100) * (vol / 100), 2)
+      }
+    })
   }
 
   // Helper: renegotiate all peer connections after adding/removing tracks
@@ -1615,11 +1663,11 @@ export default function Chat() {
   const deleteDmChannel = (dm, mode) => {
     setDmCtx(null)
     setConfirmDialog({
-      title: mode === 'both' ? 'Удалить чат для всех' : 'Удалить чат для себя',
+      title: mode === 'both' ? t('dm.deleteForAll') : t('dm.deleteForSelf'),
       message: mode === 'both'
-        ? `Удалить чат с ${dm.partner?.username}? Сообщения будут удалены у обоих.`
-        : `Скрыть чат с ${dm.partner?.username}? Чат пропадёт только у вас.`,
-      confirmText: 'Удалить',
+        ? t('dm.deleteConfirm').replace('{name}', dm.partner?.username)
+        : t('dm.hideConfirm').replace('{name}', dm.partner?.username),
+      confirmText: t('common.delete'),
       danger: true,
       onConfirm: async () => {
         try {
@@ -1635,9 +1683,9 @@ export default function Chat() {
   const blockUser = async (userId, username) => {
     setDmCtx(null)
     setConfirmDialog({
-      title: 'Заблокировать пользователя',
-      message: `Заблокировать ${username}? Пользователь будет удалён из друзей.`,
-      confirmText: 'Заблокировать',
+      title: t('dm.blockUser'),
+      message: t('friends.blockConfirm').replace('{name}', username),
+      confirmText: t('dm.block'),
       danger: true,
       onConfirm: async () => {
         try {
@@ -1722,7 +1770,7 @@ export default function Chat() {
       const data = await API('/api/friends/search', { method: 'POST', body: JSON.stringify({ query }) })
       setFriendSearchResult(data)
     } catch (err) {
-      setFriendSearchError(err.message === 'self' ? 'Это вы, господин!' : err.message)
+      setFriendSearchError(err.message === 'self' ? t('friends.searchSelf') : err.message)
     } finally {
       setFriendSearching(false)
     }
@@ -1786,9 +1834,9 @@ export default function Chat() {
 
   const confirmRemoveFriend = (friend) => {
     setConfirmDialog({
-      title: t('friends.removeFriend') || 'Удалить из друзей',
-      message: (t('friends.removeConfirm') || 'Вы уверены, что хотите удалить {name} из друзей?').replace('{name}', friend.username),
-      confirmText: t('friends.remove') || 'Удалить',
+      title: t('friends.removeFriend'),
+      message: t('friends.removeConfirm').replace('{name}', friend.username),
+      confirmText: t('friends.remove'),
       danger: true,
       onConfirm: () => {
         removeFriend(friend.requestId)
@@ -2411,33 +2459,33 @@ export default function Chat() {
         <div className="dm-ctx-menu" ref={dmCtxRef} style={{ top: dmCtx.y, left: dmCtx.x }}>
           <button className="ctx-item" onClick={() => { showUserProfile(dmCtx.dm.partner, dmCtx.x, dmCtx.y) }}>
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
-            <span>Профиль</span>
+            <span>{t('profile.title')}</span>
           </button>
           <button className="ctx-item" onClick={() => { markDMRead(dmCtx.dm.id); setDmCtx(null) }}>
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-            <span>Пометить как прочитанное</span>
+            <span>{t('dm.markAsRead')}</span>
           </button>
           <div className="ctx-divider" />
           <div className="ctx-item-wrap" onMouseEnter={() => setDmMuteSub(true)} onMouseLeave={() => setDmMuteSub(false)}>
             {mutedChannels[dmCtx.dm.id] && mutedChannels[dmCtx.dm.id] > Date.now() ? (
               <button className="ctx-item" onClick={() => { unmuteChannel(dmCtx.dm.id); setDmCtx(null) }}>
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M11 5L6 9H2v6h4l5 4V5z"/><path d="M19.07 4.93a10 10 0 010 14.14M15.54 8.46a5 5 0 010 7.07"/></svg>
-                <span>Включить уведомления</span>
+                <span>{t('dm.enableNotifications')}</span>
               </button>
             ) : (
               <>
                 <button className="ctx-item" onClick={() => { muteChannel(dmCtx.dm.id, Infinity); setDmCtx(null) }}>
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M11 5L6 9H2v6h4l5 4V5z"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>
-                  <span>Заглушить уведомления</span>
+                  <span>{t('dm.muteNotifications')}</span>
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{marginLeft:'auto'}} onClick={(e) => { e.stopPropagation(); setDmMuteSub(!dmMuteSub) }}><polyline points="9 18 15 12 9 6"/></svg>
                 </button>
                 {dmMuteSub && (
                   <div className="channel-mute-submenu">
-                    <button className="ctx-item" onClick={() => { muteChannel(dmCtx.dm.id, 15); setDmCtx(null) }}>15 минут</button>
-                    <button className="ctx-item" onClick={() => { muteChannel(dmCtx.dm.id, 60); setDmCtx(null) }}>1 час</button>
-                    <button className="ctx-item" onClick={() => { muteChannel(dmCtx.dm.id, 480); setDmCtx(null) }}>8 часов</button>
-                    <button className="ctx-item" onClick={() => { muteChannel(dmCtx.dm.id, 1440); setDmCtx(null) }}>24 часа</button>
-                    <button className="ctx-item" onClick={() => { muteChannel(dmCtx.dm.id, Infinity); setDmCtx(null) }}>Навсегда</button>
+                    <button className="ctx-item" onClick={() => { muteChannel(dmCtx.dm.id, 15); setDmCtx(null) }}>{t('mute.15min')}</button>
+                    <button className="ctx-item" onClick={() => { muteChannel(dmCtx.dm.id, 60); setDmCtx(null) }}>{t('mute.1hour')}</button>
+                    <button className="ctx-item" onClick={() => { muteChannel(dmCtx.dm.id, 480); setDmCtx(null) }}>{t('mute.8hours')}</button>
+                    <button className="ctx-item" onClick={() => { muteChannel(dmCtx.dm.id, 1440); setDmCtx(null) }}>{t('mute.24hours')}</button>
+                    <button className="ctx-item" onClick={() => { muteChannel(dmCtx.dm.id, Infinity); setDmCtx(null) }}>{t('channel.muteForever')}</button>
                   </div>
                 )}
               </>
@@ -2446,22 +2494,22 @@ export default function Chat() {
           <div className="ctx-divider" />
           <button className="ctx-item" onClick={() => deleteDmChannel(dmCtx.dm, 'self')}>
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
-            <span>Удалить чат у себя</span>
+            <span>{t('dm.deleteForSelf')}</span>
           </button>
           <button className="ctx-item ctx-danger" onClick={() => deleteDmChannel(dmCtx.dm, 'both')}>
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
-            <span>Удалить чат у обоих</span>
+            <span>{t('dm.deleteForAll')}</span>
           </button>
           <div className="ctx-divider" />
           {blockedUsers.includes(dmCtx.dm.partner?.id) ? (
             <button className="ctx-item" onClick={() => unblockUser(dmCtx.dm.partner?.id)}>
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/></svg>
-              <span>Разблокировать</span>
+              <span>{t('friends.unblock')}</span>
             </button>
           ) : (
             <button className="ctx-item ctx-danger" onClick={() => blockUser(dmCtx.dm.partner?.id, dmCtx.dm.partner?.username)}>
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>
-              <span>Заблокировать</span>
+              <span>{t('dm.block')}</span>
             </button>
           )}
         </div>
@@ -2478,54 +2526,54 @@ export default function Chat() {
             <div className={`upc-status-dot ${userProfilePopup.user?.status || 'offline'}`} />
           </div>
           <div className="upc-body">
-            <div className={`upc-name copyable-name ${streamerMode && userProfilePopup.user?.id === user.id ? 'streamer-blur' : ''}`} onClick={(e) => copyUsername(userProfilePopup.user?.username, userProfilePopup.user?.tag, e)} title={copiedName ? '✓ Скопировано!' : 'Нажмите чтобы скопировать'}>{userProfilePopup.user?.username}<span className="user-tag">#{userProfilePopup.user?.tag}</span></div>
+            <div className={`upc-name copyable-name ${streamerMode && userProfilePopup.user?.id === user.id ? 'streamer-blur' : ''}`} onClick={(e) => copyUsername(userProfilePopup.user?.username, userProfilePopup.user?.tag, e)} title={copiedName ? t('profile.copied') : t('profile.clickToCopy')}>{userProfilePopup.user?.username}<span className="user-tag">#{userProfilePopup.user?.tag}</span></div>
             {userProfilePopup.user?.bio && (
               <div className="upc-section">
-                <div className="upc-section-title">О СЕБЕ</div>
+                <div className="upc-section-title">{t('profile.aboutMe')}</div>
                 <div className="upc-bio">{userProfilePopup.user.bio}</div>
               </div>
             )}
             <div className="upc-section">
-              <div className="upc-section-title">УЧАСТНИК С</div>
+              <div className="upc-section-title">{t('profile.memberSince')}</div>
               <div className="upc-date">{userProfilePopup.user?.createdAt ? new Date(userProfilePopup.user.createdAt).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric' }) : '—'}</div>
             </div>
             {userProfilePopup.user?.id !== user.id && (
               <div className="upc-actions">
-                <button className="upc-btn upc-btn-dm" onClick={() => { const p = userProfilePopup.user; setUserProfilePopup(null); openDM(p.id) }} title="Написать">
+                <button className="upc-btn upc-btn-dm" onClick={() => { const p = userProfilePopup.user; setUserProfilePopup(null); openDM(p.id) }} title={t('profile.sendMessage')}>
                   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
                 </button>
                 {!blockedUsers.includes(userProfilePopup.user?.id) && !friends.some(f => f.id === userProfilePopup.user?.id) && (() => {
                   const incomingReq = friendRequests.find(r => r.fromId === userProfilePopup.user?.id || r.from?.id === userProfilePopup.user?.id)
                   if (incomingReq) {
                     return (
-                      <button className="upc-btn upc-btn-friend" onClick={() => { acceptFriendRequest(incomingReq.id); setUserProfilePopup(null) }} title="Принять заявку">
+                      <button className="upc-btn upc-btn-friend" onClick={() => { acceptFriendRequest(incomingReq.id); setUserProfilePopup(null) }} title={t('profile.acceptRequest')}>
                         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="20 6 9 17 4 12"/></svg>
                       </button>
                     )
                   }
                   if (sentFriendRequests.has(userProfilePopup.user?.id)) {
                     return (
-                      <button className="upc-btn upc-btn-pending" title="Отменить заявку" onClick={() => cancelFriendRequest(userProfilePopup.user?.id)}>
+                      <button className="upc-btn upc-btn-pending" title={t('profile.cancelRequest')} onClick={() => cancelFriendRequest(userProfilePopup.user?.id)}>
                         <svg className="upc-pending-clock" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
                         <svg className="upc-pending-x" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
                       </button>
                     )
                   }
                   return (
-                    <button className="upc-btn upc-btn-friend" onClick={() => sendFriendRequest(userProfilePopup.user?.id)} title="Добавить в друзья">
+                    <button className="upc-btn upc-btn-friend" onClick={() => sendFriendRequest(userProfilePopup.user?.id)} title={t('profile.addFriend')}>
                       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M16 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="20" y1="8" x2="20" y2="14"/><line x1="23" y1="11" x2="17" y2="11"/></svg>
                     </button>
                   )
                 })()}
                 {friends.some(f => f.id === userProfilePopup.user?.id) && (
-                  <button className="upc-btn upc-btn-friend-ok" title="Удалить из друзей" onClick={() => {
+                  <button className="upc-btn upc-btn-friend-ok" title={t('profile.removeFriend')} onClick={() => {
                     const friend = friends.find(f => f.id === userProfilePopup.user?.id)
                     const uname = userProfilePopup.user?.username
                     setUserProfilePopup(null)
                     setConfirmDialog({
-                      title: 'Удалить из друзей',
-                      message: `Вы уверены, что хотите удалить ${uname} из друзей?`,
-                      confirmText: 'Удалить',
+                      title: t('friends.removeFriend'),
+                      message: t('friends.removeConfirm').replace('{name}', uname),
+                      confirmText: t('friends.remove'),
                       danger: true,
                       onConfirm: async () => {
                         if (friend?.requestId) await removeFriend(friend.requestId)
@@ -2538,9 +2586,9 @@ export default function Chat() {
                   </button>
                 )}
                 {blockedUsers.includes(userProfilePopup.user?.id) ? (
-                  <button className="upc-btn-text" onClick={() => { unblockUser(userProfilePopup.user?.id); setUserProfilePopup(null) }}>Разблокировать</button>
+                  <button className="upc-btn-text" onClick={() => { unblockUser(userProfilePopup.user?.id); setUserProfilePopup(null) }}>{t('friends.unblock')}</button>
                 ) : (
-                  <button className="upc-btn-text upc-btn-block" onClick={() => { blockUser(userProfilePopup.user?.id, userProfilePopup.user?.username); setUserProfilePopup(null) }}>Заблокировать</button>
+                  <button className="upc-btn-text upc-btn-block" onClick={() => { blockUser(userProfilePopup.user?.id, userProfilePopup.user?.username); setUserProfilePopup(null) }}>{t('dm.block')}</button>
                 )}
               </div>
             )}
@@ -2589,8 +2637,8 @@ export default function Chat() {
               </button>
               {dmSearchResults ? (
                 <>
-                  <div className="dm-section-header"><span>{t('common.search')} — {dmSearchResults.length} чат(ов)</span></div>
-                  {dmSearchResults.length === 0 && <div className="dm-search-empty">Ничего не найдено</div>}
+                  <div className="dm-section-header"><span>{t('common.search')} — {dmSearchResults.length} {t('dm.searchChats')}</span></div>
+                  {dmSearchResults.length === 0 && <div className="dm-search-empty">{t('dm.searchNothing')}</div>}
                   {dmSearchResults.map(r => {
                     const highlightText = (text, query) => {
                       if (!text || !query) return text
@@ -2641,7 +2689,7 @@ export default function Chat() {
                           <div className="dm-item-info">
                             <span className="dm-item-name">{r.nameMatch ? highlightText(r.partner.username, dmSearchQuery) : r.partner.username}</span>
                             {r.matchedMessages && r.matchedMessages.length > 0 && (
-                              <span className="dm-item-last dm-search-match">{r.matchedMessages.length} сообщ. найдено</span>
+                              <span className="dm-item-last dm-search-match">{r.matchedMessages.length} {t('dm.searchFound')}</span>
                             )}
                           </div>
                           {r.matchedMessages && r.matchedMessages.length > 0 && (
@@ -2669,7 +2717,7 @@ export default function Chat() {
                 <span>{t('nav.directMessages')}</span>
                 <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
                   {totalDMUnread > 0 && (
-                    <button title="Прочитать все" onClick={markAllDMsRead} className="mark-read-btn">
+                    <button title={t('dm.readAll')} onClick={markAllDMsRead} className="mark-read-btn">
                       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
                     </button>
                   )}
@@ -2696,17 +2744,17 @@ export default function Chat() {
                   </div>
                   {mutedChannels[dm.id] && mutedChannels[dm.id] > Date.now() && (
                     <span className="mute-indicator" title={(() => {
-                      if (mutedChannels[dm.id] >= 9999999999999) return 'Заглушено навсегда (нажмите чтобы включить)'
+                      if (mutedChannels[dm.id] >= 9999999999999) return t('mute.forever')
                       const left = mutedChannels[dm.id] - Date.now()
-                      if (left > 86400000) return `Заглушено на ${Math.ceil(left / 86400000)} дн.`
-                      if (left > 3600000) return `Заглушено на ${Math.ceil(left / 3600000)} ч.`
-                      return `Заглушено на ${Math.ceil(left / 60000)} мин.`
+                      if (left > 86400000) return t('mute.days').replace('{n}', Math.ceil(left / 86400000))
+                      if (left > 3600000) return t('mute.hours').replace('{n}', Math.ceil(left / 3600000))
+                      return t('mute.minutes').replace('{n}', Math.ceil(left / 60000))
                     })()} onClick={(e) => { e.stopPropagation(); unmuteChannel(dm.id) }}>
                       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M8.7 3A6 6 0 0118 8c0 3.2.9 5.4 1.8 6.8M3.3 3.3L2 2m11.7 19a2 2 0 01-3.5 0M6.3 6.3A6 6 0 006 8c0 7-3 9-3 9h12.3"/><line x1="2" y1="2" x2="22" y2="22"/></svg>
                     </span>
                   )}
                   {dmUnread > 0 && (
-                    <span className="dm-unread-badge" onClick={(e) => markDMRead(dm.id, e)} title="Пометить как прочитанное">{dmUnread}</span>
+                    <span className="dm-unread-badge" onClick={(e) => markDMRead(dm.id, e)} title={t('dm.markAsRead')}>{dmUnread}</span>
                   )}
                 </button>
               )})}
@@ -2780,15 +2828,15 @@ export default function Chat() {
                   onClick={() => { setActiveChannel(c); setVoiceViewChannel(null) }}
                 >
                   {mutedChannels[c.id] && mutedChannels[c.id] > Date.now() ? (
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" opacity=".5" title={(() => { if (mutedChannels[c.id] >= 9999999999999) return 'Заглушено навсегда'; const left = mutedChannels[c.id] - Date.now(); if (left > 86400000) return `Заглушено на ${Math.ceil(left / 86400000)} дн.`; if (left > 3600000) return `Заглушено на ${Math.ceil(left / 3600000)} ч.`; return `Заглушено на ${Math.ceil(left / 60000)} мин.` })()}><path d="M11 5L6 9H2v6h4l5 4V5z"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" opacity=".5" title={(() => { if (mutedChannels[c.id] >= 9999999999999) return t('mute.forever'); const left = mutedChannels[c.id] - Date.now(); if (left > 86400000) return t('mute.days').replace('{n}', Math.ceil(left / 86400000)); if (left > 3600000) return t('mute.hours').replace('{n}', Math.ceil(left / 3600000)); return t('mute.minutes').replace('{n}', Math.ceil(left / 60000)) })()}><path d="M11 5L6 9H2v6h4l5 4V5z"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>
                   ) : (
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="4" y1="9" x2="20" y2="9"/><line x1="4" y1="15" x2="20" y2="15"/><line x1="10" y1="3" x2="8" y2="21"/><line x1="16" y1="3" x2="14" y2="21"/></svg>
                   )}
                   <span>{c.name}</span>
                   {chUnread > 0 && (
-                    <span className="channel-unread-badge" onClick={(e) => markChannelRead(c.id, e)} title="Пометить как прочитанное">{chUnread}</span>
+                    <span className="channel-unread-badge" onClick={(e) => markChannelRead(c.id, e)} title={t('dm.markAsRead')}>{chUnread}</span>
                   )}
-                  <span className="channel-gear" onClick={(e) => handleChannelGear(e, c)} title="Настройки канала">
+                  <span className="channel-gear" onClick={(e) => handleChannelGear(e, c)} title={t('channel.settings')}>
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 15a3 3 0 100-6 3 3 0 000 6z"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
                   </span>
                 </button>
@@ -2822,7 +2870,7 @@ export default function Chat() {
                     {vcUsers.length > 0 && (
                       <div className="voice-users-list">
                         {vcUsers.map(vu => (
-                          <div key={vu.id} className="voice-user-item">
+                          <div key={vu.id} className="voice-user-item" onContextMenu={e => { if (vu.id !== user.id) { e.preventDefault(); setVoiceUserCtx({ user: vu, x: e.clientX, y: e.clientY }) } }}>
                             <div className={`voice-user-avatar ${speakingUsers.has(vu.id) ? 'speaking' : ''}`} style={{ background: vu.avatarColor }}>
                               {vu.username[0].toUpperCase()}
                             </div>
@@ -2897,10 +2945,10 @@ export default function Chat() {
                     <div className={`status-dot ${user.status || 'online'}`} />
                   </div>
                   <div className="popup-info">
-                    <div className={`popup-name copyable-name ${streamerMode ? 'streamer-blur' : ''}`} onClick={(e) => copyUsername(user.username, user.tag, e)} title={copiedName ? '✓ Скопировано!' : 'Нажмите чтобы скопировать'}>{user.username}<span className="user-tag">#{user.tag}</span></div>
+                    <div className={`popup-name copyable-name ${streamerMode ? 'streamer-blur' : ''}`} onClick={(e) => copyUsername(user.username, user.tag, e)} title={copiedName ? t('profile.copied') : t('profile.clickToCopy')}>{user.username}<span className="user-tag">#{user.tag}</span></div>
                     <div className="popup-email" onClick={() => {
                       if (!emailRevealed) { setEmailRevealed(true); setTimeout(() => setEmailRevealed(false), 3000) }
-                    }} title={streamerMode ? 'Скрыто (режим стримера)' : (emailRevealed ? user.email : 'Нажмите чтобы показать')}>
+                    }} title={streamerMode ? t('profile.emailHidden') : (emailRevealed ? user.email : t('profile.emailReveal'))}>
                       {streamerMode ? <span className="streamer-blur">{user.email}</span> : (<>{emailRevealed ? user.email : <><span className="email-blurred">{user.email.split('@')[0]}</span>@{user.email.split('@')[1]}</>}</>)}
                     </div>
                     {user.bio && <div className="popup-bio">{user.bio}</div>}
@@ -3009,8 +3057,8 @@ export default function Chat() {
                         {msg.replyTo && (
                           <div className="msg-reply-ref" onClick={() => { const el = document.getElementById('msg-' + msg.replyTo.id); if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); el.classList.remove('msg-highlight'); void el.offsetWidth; el.classList.add('msg-highlight'); setTimeout(() => el.classList.remove('msg-highlight'), 2000) } }}>
                             <div className="msg-reply-line" style={{ background: msg.replyTo.user?.avatarColor || 'var(--primary)' }} />
-                            <span className="msg-reply-author" style={{ color: msg.replyTo.user?.avatarColor }}>{msg.replyTo.user?.username || 'Deleted User'}</span>
-                            <span className="msg-reply-text">{msg.replyTo.content || 'Сообщение удалено'}</span>
+                            <span className="msg-reply-author" style={{ color: msg.replyTo.user?.avatarColor }}>{msg.replyTo.user?.username || t('msg.deletedUser')}</span>
+                            <span className="msg-reply-text">{msg.replyTo.content || t('msg.replyContent')}</span>
                           </div>
                         )}
                         {!isGrouped && (
@@ -3103,7 +3151,7 @@ export default function Chat() {
               </div>
             </div>
               {showScrollBtn && (
-                <button className="scroll-bottom-btn" onClick={scrollToBottom} title="Прокрутить вниз">
+                <button className="scroll-bottom-btn" onClick={scrollToBottom} title={t('msg.scrollDown')}>
                   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
                 </button>
               )}
@@ -3111,7 +3159,7 @@ export default function Chat() {
             {blockedByPartner || blockedUsers.includes(activeDM.partner?.id) ? (
               <div className="chat-input-blocked">
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="10"/><path d="M4.93 4.93l14.14 14.14"/></svg>
-                <span>{blockedUsers.includes(activeDM.partner?.id) ? 'Вы заблокировали этого пользователя' : 'Вы не можете отправлять сообщения этому пользователю'}</span>
+                <span>{blockedUsers.includes(activeDM.partner?.id) ? t('msg.blockedUser') : t('msg.cannotSend')}</span>
               </div>
             ) : (
               <form className="chat-input-form" onSubmit={sendDM}>
@@ -3119,8 +3167,8 @@ export default function Chat() {
                   <div className="reply-bar">
                     <div className="reply-bar-line" style={{ background: replyTo.user?.avatarColor || 'var(--primary)' }} />
                     <div className="reply-bar-content">
-                      <span className="reply-bar-label">Ответ <span className="reply-bar-author" style={{ color: replyTo.user?.avatarColor }}>{replyTo.user?.username}</span></span>
-                      <span className="reply-bar-text">{replyTo.content || 'Вложение'}</span>
+                      <span className="reply-bar-label">{t('message.reply')} <span className="reply-bar-author" style={{ color: replyTo.user?.avatarColor }}>{replyTo.user?.username}</span></span>
+                      <span className="reply-bar-text">{replyTo.content || t('message.attachment')}</span>
                     </div>
                     <button type="button" className="reply-bar-close" onClick={() => setReplyTo(null)}>
                       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
@@ -3152,7 +3200,7 @@ export default function Chat() {
                   </div>
                   <input
                     type="text"
-                    placeholder={`Написать @${activeDM.partner?.username}`}
+                    placeholder={t('dm.writeToPlaceholder').replace('{name}', activeDM.partner?.username)}
                     value={input}
                     onChange={e => setInput(e.target.value)}
                     maxLength={200}
@@ -3179,7 +3227,7 @@ export default function Chat() {
                     {t('friends.pending')}
                     {friendRequests.length > 0 && <span className="friends-tab-badge">{friendRequests.length}</span>}
                   </button>
-                  <button className={`friends-tab ${friendsTab === 'blocked' ? 'active' : ''}`} onClick={() => setFriendsTab('blocked')}>Заблокированные</button>
+                  <button className={`friends-tab ${friendsTab === 'blocked' ? 'active' : ''}`} onClick={() => setFriendsTab('blocked')}>{t('friends.blocked')}</button>
                   <button className={`friends-tab friends-tab-add ${friendsTab === 'add' ? 'active' : ''}`} onClick={() => setFriendsTab('add')}>{t('friends.add')}</button>
                 </div>
               </div>
@@ -3323,7 +3371,7 @@ export default function Chat() {
                                 </div>
                               </div>
                               <div className="friend-actions">
-                                <button className="friend-decline-btn" onClick={() => cancelFriendRequest(fr.toId, fr.id)} title="Отменить">
+                                <button className="friend-decline-btn" onClick={() => cancelFriendRequest(fr.toId, fr.id)} title={t('common.cancel')}>
                                   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
                                 </button>
                               </div>
@@ -3416,12 +3464,12 @@ export default function Chat() {
                           <circle cx="12" cy="12" r="10" stroke="url(#emptyGrad2)"/><path d="M4.93 4.93l14.14 14.14" stroke="url(#emptyGrad2)"/>
                         </svg>
                       </div>
-                      <h4>Нет заблокированных</h4>
-                      <p>У вас нет заблокированных пользователей</p>
+                      <h4>{t('friends.noBlocked')}</h4>
+                      <p>{t('friends.noBlockedSub')}</p>
                     </div>
                   ) : (
                     <>
-                      <div className="friends-section-label">Заблокированные — {blockedUsersDetails.length}</div>
+                      <div className="friends-section-label">{t('friends.blocked')} — {blockedUsersDetails.length}</div>
                       {blockedUsersDetails.map(bu => (
                         <div key={bu.id} className="friend-item">
                           <div className="friend-item-left">
@@ -3430,11 +3478,11 @@ export default function Chat() {
                             </div>
                             <div className="friend-item-info">
                               <span className="friend-item-name">{bu.username}<span className="user-tag">#{bu.tag}</span></span>
-                              <span className="friend-item-status">Заблокирован</span>
+                              <span className="friend-item-status">{t('friends.blocked')}</span>
                             </div>
                           </div>
                           <div className="friend-actions">
-                            <button className="btn-sm" onClick={() => unblockUser(bu.id)} title="Разблокировать">Разблокировать</button>
+                            <button className="btn-sm" onClick={() => unblockUser(bu.id)} title={t('friends.unblock')}>{t('friends.unblock')}</button>
                           </div>
                         </div>
                       ))}
@@ -3480,7 +3528,7 @@ export default function Chat() {
                         setFocusedStreamUser(userId)
                         setFocusedStreamType('screen')
                       }
-                    }} title={isPinned ? 'Открепить' : 'Закрепить'}>
+                    }} title={isPinned ? t('voice.unpin') : t('voice.pin')}>
                       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z"/></svg>
                     </button>
                   )
@@ -3523,27 +3571,27 @@ export default function Chat() {
                         ) : (
                           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
                         )}
-                        <span>{(showScreen || (!showCamera && focusedIsScreenSharing)) ? `Экран ${focusedUser.username}` : focusedUser.username}</span>
+                        <span>{(showScreen || (!showCamera && focusedIsScreenSharing)) ? t('voice.screen').replace('{name}', focusedUser.username) : focusedUser.username}</span>
                         {focusedHasBoth && (
                           <div className="voice-focused-switch">
                             <button className={`vfs-btn ${focusedStreamType === 'screen' ? 'active' : ''}`} onClick={() => setFocusedStreamType('screen')}>
                               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
-                              Экран
+                              {t('voice.screenLabel')}
                             </button>
                             <button className={`vfs-btn ${focusedStreamType === 'camera' ? 'active' : ''}`} onClick={() => setFocusedStreamType('camera')}>
                               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>
-                              Камера
+                              {t('voice.camera')}
                             </button>
                           </div>
                         )}
                         {pinnedUser && (
                           <button className="voice-focused-unpin" onClick={() => setPinnedUser(null)}>
                             <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z"/></svg>
-                            Закреплено
+                            {t('voice.pinned')}
                           </button>
                         )}
                         <button className="voice-focused-stop" onClick={() => { setFocusedStreamUser(null); setPinnedUser(null) }}>
-                          Вернуться в сетку
+                          {t('voice.backToGrid')}
                         </button>
                       </div>
                     </div>
@@ -3624,10 +3672,10 @@ export default function Chat() {
                               </div>
                               <div className="voice-tile-screen-info">
                                 <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--text-secondary)" strokeWidth="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
-                                <span>{vu.username} демонстрирует экран</span>
+                                <span>{t('voice.sharingScreen').replace('{name}', vu.username)}</span>
                                 <button className="voice-watch-btn" onClick={(e) => { e.stopPropagation(); setFocusedStreamUser(vu.id); setFocusedStreamType('screen') }}>
                                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-                                  {isLocal ? 'Просмотреть' : 'Начать просмотр'}
+                                  {isLocal ? t('voice.view') : t('voice.startViewing')}
                                 </button>
                               </div>
                             </div>
@@ -3841,8 +3889,8 @@ export default function Chat() {
                           {msg.replyTo && (
                             <div className="msg-reply-ref" onClick={() => { const el = document.getElementById('msg-' + msg.replyTo.id); if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); el.classList.remove('msg-highlight'); void el.offsetWidth; el.classList.add('msg-highlight'); setTimeout(() => el.classList.remove('msg-highlight'), 2000) } }}>
                               <div className="msg-reply-line" style={{ background: msg.replyTo.user?.avatarColor || 'var(--primary)' }} />
-                              <span className="msg-reply-author" style={{ color: msg.replyTo.user?.avatarColor }}>{msg.replyTo.user?.username || 'Deleted User'}</span>
-                              <span className="msg-reply-text">{msg.replyTo.content || 'Сообщение удалено'}</span>
+                              <span className="msg-reply-author" style={{ color: msg.replyTo.user?.avatarColor }}>{msg.replyTo.user?.username || t('msg.deletedUser')}</span>
+                              <span className="msg-reply-text">{msg.replyTo.content || t('msg.replyContent')}</span>
                             </div>
                           )}
                           {!isGrouped && (
@@ -3903,7 +3951,7 @@ export default function Chat() {
                 )}
               </div>
                 {showScrollBtn && (
-                  <button className="scroll-bottom-btn" onClick={scrollToBottom} title="Прокрутить вниз">
+                  <button className="scroll-bottom-btn" onClick={scrollToBottom} title={t('msg.scrollDown')}>
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
                   </button>
                 )}
@@ -3920,8 +3968,8 @@ export default function Chat() {
                             <div className={`status-dot ${m.status}`} />
                           </div>
                           <span className={streamerMode && m.id === user.id ? 'streamer-blur' : ''}>{m.username}<span className="user-tag">#{m.tag}</span></span>
-                          {m.role === 'owner' && <span className="role-badge owner" title="Владелец">👑</span>}
-                          {m.role === 'admin' && <span className="role-badge admin" title="Админ">🛡️</span>}
+                          {m.role === 'owner' && <span className="role-badge owner" title={t('members.owner')}>👑</span>}
+                          {m.role === 'admin' && <span className="role-badge admin" title={t('role.admin')}>🛡️</span>}
                         </div>
                       ))}
                     </>
@@ -3936,8 +3984,8 @@ export default function Chat() {
                             <div className="status-dot" />
                           </div>
                           <span className={streamerMode && m.id === user.id ? 'streamer-blur' : ''}>{m.username}<span className="user-tag">#{m.tag}</span></span>
-                          {m.role === 'owner' && <span className="role-badge owner" title="Владелец">👑</span>}
-                          {m.role === 'admin' && <span className="role-badge admin" title="Админ">🛡️</span>}
+                          {m.role === 'owner' && <span className="role-badge owner" title={t('members.owner')}>👑</span>}
+                          {m.role === 'admin' && <span className="role-badge admin" title={t('role.admin')}>🛡️</span>}
                         </div>
                       ))}
                     </>
@@ -3950,8 +3998,8 @@ export default function Chat() {
                 <div className="reply-bar">
                   <div className="reply-bar-line" style={{ background: replyTo.user?.avatarColor || 'var(--primary)' }} />
                   <div className="reply-bar-content">
-                    <span className="reply-bar-label">Ответ <span className="reply-bar-author" style={{ color: replyTo.user?.avatarColor }}>{replyTo.user?.username}</span></span>
-                    <span className="reply-bar-text">{replyTo.content || 'Вложение'}</span>
+                    <span className="reply-bar-label">{t('message.reply')} <span className="reply-bar-author" style={{ color: replyTo.user?.avatarColor }}>{replyTo.user?.username}</span></span>
+                    <span className="reply-bar-text">{replyTo.content || t('message.attachment')}</span>
                   </div>
                   <button type="button" className="reply-bar-close" onClick={() => setReplyTo(null)}>
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
@@ -4027,7 +4075,7 @@ export default function Chat() {
           {!msgCtx.msg.deleted && !msgCtx.msg.type && (
             <button className="ctx-item" onClick={() => { setReplyTo({ id: msgCtx.msg.id, content: msgCtx.msg.content, user: msgCtx.msg.user, isDM: msgCtx.isDM }); setMsgCtx(null) }}>
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 00-4-4H4"/></svg>
-              <span>Ответить</span>
+              <span>{t('message.replyAction')}</span>
             </button>
           )}
           {msgCtx.msg.content && (
@@ -4071,30 +4119,30 @@ export default function Chat() {
           <div className="ctx-header">{memberCtx.member.username}</div>
           <button className="ctx-item" onClick={() => { showUserProfile(memberCtx.member, memberCtx.x, memberCtx.y); setMemberCtx(null) }}>
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
-            <span>Профиль</span>
+            <span>{t('profile.title')}</span>
           </button>
           <button className="ctx-item" onClick={() => { openDM(memberCtx.member.id); setMemberCtx(null) }}>
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
-            <span>Написать</span>
+            <span>{t('dm.write')}</span>
           </button>
           {hasServerPerm('manageRoles') && memberCtx.member.role !== 'owner' && (<>
             <div className="ctx-divider" />
             {memberCtx.member.role === 'admin' ? (
               <button className="ctx-item ctx-danger" onClick={() => toggleMemberRole(memberCtx.member.id, 'admin')}>
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><line x1="9" y1="9" x2="15" y2="15"/><line x1="15" y1="9" x2="9" y2="15"/></svg>
-                <span>Снять админку</span>
+                <span>{t('server.removeAdmin')}</span>
               </button>
             ) : (
               <button className="ctx-item" onClick={() => toggleMemberRole(memberCtx.member.id, 'user')}>
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-                <span>Дать админку</span>
+                <span>{t('server.makeAdmin')}</span>
               </button>
             )}
           </>)}
           {hasServerPerm('kickMembers') && memberCtx.member.role !== 'owner' && (
             <button className="ctx-item ctx-danger" onClick={() => { kickMember(memberCtx.member.id); setMemberCtx(null) }}>
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M16 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="18" y1="11" x2="23" y2="11"/></svg>
-              <span>Кикнуть</span>
+              <span>{t('server.kick')}</span>
             </button>
           )}
         </div>
@@ -4141,7 +4189,7 @@ export default function Chat() {
                     <button className="ctx-item" onClick={() => muteChannel(channelMenu.channel.id, 30)}>{t('channel.mute30')}</button>
                     <button className="ctx-item" onClick={() => muteChannel(channelMenu.channel.id, 60)}>{t('channel.mute60')}</button>
                     <button className="ctx-item" onClick={() => muteChannel(channelMenu.channel.id, 1440)}>{t('channel.mute1440')}</button>
-                    <button className="ctx-item" onClick={() => muteChannel(channelMenu.channel.id, Infinity)}>{t('channel.muteForever') || 'Навсегда'}</button>
+                    <button className="ctx-item" onClick={() => muteChannel(channelMenu.channel.id, Infinity)}>{t('channel.muteForever')}</button>
                   </div>
                 )}
               </>
@@ -4472,23 +4520,23 @@ export default function Chat() {
                 <div className="settings-sidebar-title">{activeServer.name}</div>
                 <button className={`settings-nav-item ${serverSettingsTab === 'general' ? 'active' : ''}`} onClick={() => setServerSettingsTab('general')}>
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
-                  Общее
+                  {t('serverSettings.general')}
                 </button>
                 <button className={`settings-nav-item ${serverSettingsTab === 'members' ? 'active' : ''}`} onClick={() => setServerSettingsTab('members')}>
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>
-                  Участники
+                  {t('serverSettings.members')}
                 </button>
                 {isOwner && (
                   <button className={`settings-nav-item ${serverSettingsTab === 'permissions' ? 'active' : ''}`} onClick={() => setServerSettingsTab('permissions')}>
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-                    Права админов
+                    {t('serverSettings.permissions')}
                   </button>
                 )}
               </div>
               <div className="settings-content">
                 {serverSettingsTab === 'general' && (
                   <div>
-                    <h3>Общие настройки</h3>
+                    <h3>{t('serverSettings.generalTitle')}</h3>
                     <form onSubmit={async (e) => {
                       e.preventDefault()
                       try {
@@ -4519,10 +4567,10 @@ export default function Chat() {
                 )}
                 {serverSettingsTab === 'members' && (
                   <div>
-                    <h3>Участники — {members.length}</h3>
+                    <h3>{t('serverSettings.members')} — {members.length}</h3>
                     <div className="srv-members-search">
                       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-                      <input type="text" placeholder="Поиск участников..." value={memberSearchQuery} onChange={e => setMemberSearchQuery(e.target.value)} />
+                      <input type="text" placeholder={t('serverSettings.searchMembers')} value={memberSearchQuery} onChange={e => setMemberSearchQuery(e.target.value)} />
                     </div>
                     <div className="srv-members-list">
                       {members.filter(m => !memberSearchQuery || m.username.toLowerCase().includes(memberSearchQuery.toLowerCase())).map(m => {
@@ -4532,7 +4580,7 @@ export default function Chat() {
                             <div className="srv-member-avatar" style={{ background: m.avatarColor }}>{m.username[0].toUpperCase()}</div>
                             <div className="srv-member-info">
                               <span className="srv-member-name">{m.username}<span className="user-tag">#{m.tag || '0000'}</span></span>
-                              <span className={`role-badge role-${mRole}`}>{mRole === 'owner' ? '👑 Владелец' : mRole === 'admin' ? '🛡️ Админ' : 'Участник'}</span>
+                              <span className={`role-badge role-${mRole}`}>{mRole === 'owner' ? t('role.owner') : mRole === 'admin' ? t('role.admin') : t('role.member')}</span>
                             </div>
                             {canManageRoles && m.id !== user.id && mRole !== 'owner' && (
                               <div className="srv-member-actions">
@@ -4543,7 +4591,7 @@ export default function Chat() {
                                       await API(`/api/servers/${activeServer.id}/members/${m.id}/role`, { method: 'POST', body: JSON.stringify({ role: r }) })
                                       setMembers(prev => prev.map(mm => mm.id === m.id ? { ...mm, role: r } : mm))
                                     } catch {}
-                                  }}>{r === 'admin' ? '🛡️ Админ' : 'Участник'}</button>
+                                  }}>{r === 'admin' ? t('role.admin') : t('role.member')}</button>
                                 ))}
                               </div>
                             )}
@@ -4555,15 +4603,15 @@ export default function Chat() {
                 )}
                 {serverSettingsTab === 'permissions' && isOwner && (
                   <div>
-                    <h3>Права администраторов</h3>
-                    <p className="perms-desc">Настройте, какие действия могут выполнять администраторы на этом сервере.</p>
+                    <h3>{t('serverSettings.permissionsTitle')}</h3>
+                    <p className="perms-desc">{t('serverSettings.permissionsDesc')}</p>
                     {[
-                      { key: 'deleteMessages', label: 'Удалять чужие сообщения', desc: 'Админы смогут удалять сообщения других участников' },
-                      { key: 'deleteChannels', label: 'Удалять каналы', desc: 'Админы смогут удалять каналы на сервере' },
-                      { key: 'createChannels', label: 'Создавать каналы', desc: 'Админы смогут создавать новые каналы' },
-                      { key: 'kickMembers', label: 'Кикать участников', desc: 'Админы смогут выгонять участников с сервера' },
-                      { key: 'manageRoles', label: 'Управлять ролями', desc: 'Админы смогут назначать и снимать роли' },
-                      { key: 'bypassSlowmode', label: 'Обход медленного режима', desc: 'Админы не будут ограничены медленным режимом' },
+                      { key: 'deleteMessages', label: t('perm.deleteMessages'), desc: t('perm.deleteMessagesDesc') },
+                      { key: 'deleteChannels', label: t('perm.deleteChannels'), desc: t('perm.deleteChannelsDesc') },
+                      { key: 'createChannels', label: t('perm.createChannels'), desc: t('perm.createChannelsDesc') },
+                      { key: 'kickMembers', label: t('perm.kickMembers'), desc: t('perm.kickMembersDesc') },
+                      { key: 'manageRoles', label: t('perm.manageRoles'), desc: t('perm.manageRolesDesc') },
+                      { key: 'bypassSlowmode', label: t('perm.bypassSlowmode'), desc: t('perm.bypassSlowmodeDesc') },
                     ].map(p => (
                       <div key={p.key} className="perm-toggle-row">
                         <div className="perm-toggle-info">
@@ -4856,7 +4904,24 @@ export default function Chat() {
 
       {/* Hidden container for WebRTC audio elements */}
       <div id="voice-audio-container" style={{ display: 'none' }} />
-      {copyTooltip && <div className="copy-toast" style={{ left: copyTooltip.x, top: copyTooltip.y }}>Скопировано!</div>}
+      {copyTooltip && <div className="copy-toast" style={{ left: copyTooltip.x, top: copyTooltip.y }}>{t('common.copied')}</div>}
+      {voiceUserCtx && (
+        <div className="voice-user-ctx-overlay" onClick={() => setVoiceUserCtx(null)} onContextMenu={e => { e.preventDefault(); setVoiceUserCtx(null) }}>
+          <div className="voice-user-ctx" ref={voiceUserCtxRef} style={{ top: voiceUserCtx.y, left: voiceUserCtx.x }} onClick={e => e.stopPropagation()}>
+            <div className="voice-user-ctx-header">
+              <div className="voice-user-ctx-avatar" style={{ background: voiceUserCtx.user.avatarColor }}>{voiceUserCtx.user.username[0].toUpperCase()}</div>
+              <span>{voiceUserCtx.user.username}</span>
+            </div>
+            <div className="voice-user-ctx-volume">
+              <label>{t('voice.userVolume')}</label>
+              <div className="voice-user-ctx-slider">
+                <input type="range" min="0" max="200" value={userVolumes[voiceUserCtx.user.id] ?? 100} onChange={e => applyUserVolume(voiceUserCtx.user.id, +e.target.value)} />
+                <span>{userVolumes[voiceUserCtx.user.id] ?? 100}%</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

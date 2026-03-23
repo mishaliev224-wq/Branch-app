@@ -604,6 +604,38 @@
 .voice-user-status-icon { flex-shrink:0; opacity:.9; animation:iconFadeIn .2s ease; }
 .voice-user-avatar.speaking { box-shadow:0 0 0 2px #43b581; }
 
+/* Voice user context menu (volume) */
+.voice-user-ctx-overlay {
+  position:fixed; inset:0; z-index:1000;
+}
+.voice-user-ctx {
+  position:fixed; background:var(--bg-dark); border:1px solid var(--border);
+  border-radius:8px; padding:12px; min-width:220px; z-index:1001;
+  box-shadow:0 8px 24px rgba(0,0,0,.4);
+}
+.voice-user-ctx-header {
+  display:flex; align-items:center; gap:8px; margin-bottom:12px;
+  font-size:.9rem; font-weight:600; color:var(--text);
+}
+.voice-user-ctx-avatar {
+  width:28px; height:28px; border-radius:50%;
+  display:flex; align-items:center; justify-content:center;
+  color:#fff; font-weight:700; font-size:.8rem; flex-shrink:0;
+}
+.voice-user-ctx-volume label {
+  font-size:.75rem; color:var(--text-muted); text-transform:uppercase;
+  font-weight:600; letter-spacing:.5px; margin-bottom:6px; display:block;
+}
+.voice-user-ctx-slider {
+  display:flex; align-items:center; gap:8px;
+}
+.voice-user-ctx-slider input[type="range"] {
+  flex:1; accent-color:var(--primary); height:4px;
+}
+.voice-user-ctx-slider span {
+  font-size:.82rem; color:var(--text); min-width:36px; text-align:right;
+}
+
 /* Voice connection panel */
 .voice-panel {
   background:rgba(0,0,0,.25);

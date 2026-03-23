@@ -76,7 +76,7 @@ export default function Auth() {
     setError(''); setLoading(true)
     try {
       await API('/api/auth/reset/verify', { method: 'POST', body: JSON.stringify({ email: resetEmail, code: resetCode, newPassword }) })
-      setSuccessMsg('Пароль успешно изменён!')
+      setSuccessMsg(t('auth.passwordChanged'))
       setTimeout(() => { setMode('login'); setSuccessMsg('') }, 2000)
     } catch (err) { setError(err.message) } finally { setLoading(false) }
   }
@@ -130,9 +130,9 @@ export default function Auth() {
                   <div className={`remember-checkbox ${rememberMe ? 'checked' : ''}`}>
                     {rememberMe && <svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M3 8l3.5 3.5L13 5" stroke="#fff" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"/></svg>}
                   </div>
-                  Запомнить меня
+                  {t('auth.rememberMe')}
                 </label>
-                <button type="button" className="auth-forgot-link" onClick={() => { setMode('forgot'); setError('') }}>Забыли пароль?</button>
+                <button type="button" className="auth-forgot-link" onClick={() => { setMode('forgot'); setError('') }}>{t('auth.forgotPassword')}</button>
               </div>
               <button type="submit" className="auth-btn" disabled={loading}>
                 {loading ? <span className="btn-loader" /> : t('auth.loginBtn')}
@@ -167,17 +167,17 @@ export default function Auth() {
               </div>
               {captcha && (
                 <div className="field captcha-field">
-                  <label>Капча: <span className="captcha-question">{captcha.question}</span></label>
+                  <label>{t('auth.captcha')} <span className="captcha-question">{captcha.question}</span></label>
                   <div className="captcha-row">
-                    <input type="number" placeholder="Ответ" value={captchaAnswer} onChange={e => setCaptchaAnswer(e.target.value)} required />
-                    <button type="button" className="captcha-refresh" onClick={loadCaptcha} title="Обновить">
+                    <input type="number" placeholder={t('auth.captchaAnswer')} value={captchaAnswer} onChange={e => setCaptchaAnswer(e.target.value)} required />
+                    <button type="button" className="captcha-refresh" onClick={loadCaptcha} title={t('auth.captchaRefresh')}>
                       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"/></svg>
                     </button>
                   </div>
                 </div>
               )}
               <button type="submit" className="auth-btn" disabled={loading}>
-                {loading ? <span className="btn-loader" /> : 'Отправить код'}
+                {loading ? <span className="btn-loader" /> : t('auth.sendCode')}
               </button>
             </form>
             <p className="auth-toggle">
@@ -189,64 +189,64 @@ export default function Auth() {
 
         {mode === 'verify' && (
           <>
-            <h2>Подтверждение</h2>
-            <p className="auth-sub">Введите 6-значный код, отправленный на <strong>{verifyEmail}</strong></p>
+            <h2>{t('auth.verification')}</h2>
+            <p className="auth-sub">{t('auth.verifyCodeMsg')} <strong>{verifyEmail}</strong></p>
             <form onSubmit={handleVerify}>
               <div className="field">
-                <label>Код подтверждения</label>
+                <label>{t('auth.verifyCode')}</label>
                 <input type="text" placeholder="000000" value={verifyCode} onChange={e => setVerifyCode(e.target.value.replace(/\D/g, '').slice(0, 6))} required maxLength={6} className="code-input" autoFocus />
               </div>
               <button type="submit" className="auth-btn" disabled={loading || verifyCode.length !== 6}>
-                {loading ? <span className="btn-loader" /> : 'Подтвердить'}
+                {loading ? <span className="btn-loader" /> : t('auth.confirm')}
               </button>
             </form>
             <p className="auth-toggle">
-              <button onClick={() => { setMode('register'); setError('') }}>Назад к регистрации</button>
+              <button onClick={() => { setMode('register'); setError('') }}>{t('auth.backToRegister')}</button>
             </p>
           </>
         )}
 
         {mode === 'forgot' && (
           <>
-            <h2>Сброс пароля</h2>
-            <p className="auth-sub">Введите email привязанный к аккаунту</p>
+            <h2>{t('auth.resetPassword')}</h2>
+            <p className="auth-sub">{t('auth.resetPasswordMsg')}</p>
             <form onSubmit={handleForgotSendCode}>
               <div className="field">
                 <label>{t('auth.email')}</label>
                 <input type="email" placeholder="you@example.com" value={resetEmail} onChange={e => setResetEmail(e.target.value)} required autoFocus />
               </div>
               <button type="submit" className="auth-btn" disabled={loading}>
-                {loading ? <span className="btn-loader" /> : 'Отправить код'}
+                {loading ? <span className="btn-loader" /> : t('auth.sendCode')}
               </button>
             </form>
             <p className="auth-toggle">
-              <button onClick={() => { setMode('login'); setError('') }}>Назад к входу</button>
+              <button onClick={() => { setMode('login'); setError('') }}>{t('auth.backToLogin')}</button>
             </p>
           </>
         )}
 
         {mode === 'reset' && (
           <>
-            <h2>Новый пароль</h2>
-            <p className="auth-sub">Введите код из письма и новый пароль</p>
+            <h2>{t('auth.newPassword')}</h2>
+            <p className="auth-sub">{t('auth.newPasswordMsg')}</p>
             <form onSubmit={handleResetPassword}>
               <div className="field">
-                <label>Код из письма</label>
+                <label>{t('auth.codeFromEmail')}</label>
                 <input type="text" placeholder="000000" value={resetCode} onChange={e => setResetCode(e.target.value.replace(/\D/g, '').slice(0, 6))} required maxLength={6} className="code-input" autoFocus />
               </div>
               <div className="field">
-                <label>Новый пароль</label>
+                <label>{t('auth.newPassword')}</label>
                 <div className="password-field">
                   <input type={showNewPassword ? 'text' : 'password'} placeholder="••••••••" value={newPassword} onChange={e => setNewPassword(e.target.value)} required minLength={6} />
                   <EyeIcon show={showNewPassword} onClick={() => setShowNewPassword(!showNewPassword)} />
                 </div>
               </div>
               <button type="submit" className="auth-btn" disabled={loading || resetCode.length !== 6}>
-                {loading ? <span className="btn-loader" /> : 'Установить пароль'}
+                {loading ? <span className="btn-loader" /> : t('auth.setPassword')}
               </button>
             </form>
             <p className="auth-toggle">
-              <button onClick={() => { setMode('login'); setError('') }}>Назад к входу</button>
+              <button onClick={() => { setMode('login'); setError('') }}>{t('auth.backToLogin')}</button>
             </p>
           </>
         )}

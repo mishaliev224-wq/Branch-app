@@ -1387,6 +1387,8 @@ io.on('connection', (socket) => {
     voiceState.get(channelId).set(uid, { userId: uid, socketId: socket.id, username: socket.userData.username, avatarColor: socket.userData.avatarColor, tag: socket.userData.tag });
     socket.join('voice:' + channelId);
     io.to('server:' + channel.serverId).emit('voice-state-update', { channelId, users: getVoiceUsers(channelId) });
+    // Sound notification for others in the channel
+    socket.to('voice:' + channelId).emit('voice-sound', { type: 'join', userId: uid });
 
     // Notify existing voice users to set up WebRTC connections with the new user
     const existingUsers = getVoiceUsers(channelId).filter(u => u.id !== uid);
@@ -1396,6 +1398,8 @@ io.on('connection', (socket) => {
   socket.on('voice-leave', () => {
     for (const [chId, users] of voiceState) {
       if (users.has(uid)) {
+        // Sound notification before removing
+        socket.to('voice:' + chId).emit('voice-sound', { type: 'leave', userId: uid });
         users.delete(uid);
         socket.leave('voice:' + chId);
         if (users.size === 0) voiceState.delete(chId);
@@ -1415,6 +1419,8 @@ io.on('connection', (socket) => {
         userData.deafened = !!deafened;
         const ch = db.channels.find(c => c.id === chId);
         if (ch) io.to('server:' + ch.serverId).emit('voice-state-update', { channelId: chId, users: getVoiceUsers(chId) });
+        // Sound notification for others
+        socket.to('voice:' + chId).emit('voice-sound', { type: 'mute', userId: uid });
         break;
       }
     }
