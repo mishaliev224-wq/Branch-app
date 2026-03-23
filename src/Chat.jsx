@@ -959,9 +959,8 @@ export default function Chat() {
     })
 
     socket.on('voice-sound', ({ type }) => {
-      const vol = 0.8
       const a = new Audio(type === 'join' ? '/voice_connect.wav' : type === 'leave' ? '/voice_disconnect.wav' : type === 'unmute' ? '/unmute.wav' : '/mute_toggle.m4a')
-      a.volume = vol
+      a.volume = 1
       a.play().catch(() => {})
     })
 
@@ -1131,7 +1130,7 @@ export default function Chat() {
   const toggleVoiceMute = async () => {
     const newMuted = !voiceMuted
     if (!localStream.current) {
-      if (newMuted) { setVoiceMuted(true); playVoiceSound('/mute_toggle.m4a', 0.8); socketRef.current?.emit('voice-mute-state', { muted: true, deafened: voiceDeafened }); return }
+      if (newMuted) { setVoiceMuted(true); playVoiceSound('/mute_toggle.m4a', 1); socketRef.current?.emit('voice-mute-state', { muted: true, deafened: voiceDeafened }); return }
       // Try to get mic if we didn't have it before
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: selectedMicId ? { deviceId: { exact: selectedMicId } } : true })
