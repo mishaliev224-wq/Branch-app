@@ -11,7 +11,12 @@ import nodemailer from 'nodemailer';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const JWT_SECRET = 'branch-app-secret-2026';
-const DB_PATH = join(__dirname, 'db.json');
+
+// ── Persistent data directory (survives redeploys) ──
+const DATA_DIR = process.env.DATA_DIR || __dirname;
+mkdirSync(DATA_DIR, { recursive: true });
+const DB_PATH = join(DATA_DIR, 'db.json');
+const DB_BACKUP_PATH = join(DATA_DIR, 'db.backup.json');
 
 // ── Email transporter (dev mode: codes returned in response; production: set SMTP_* env vars) ──
 let mailTransporter = null;
@@ -47,10 +52,48 @@ async function sendEmail(to, subject, html) {
 }
 
 // ── Database ──
-function loadDB() {
-  if (existsSync(DB_PATH)) {
-    try { return JSON.parse(readFileSync(DB_PATH, 'utf-8')); } catch { /* fall through */ }
+let _lastBackupTime = 0;
+const BACKUP_INTERVAL = 60_000; // backup at most once per minute
+
+function saveDB(data) {
+  const json = JSON.stringify(data || db, null, 2);
+  writeFileSync(DB_PATH, json);
+
+  // Periodic backup to protect against corruption
+  const now = Date.now();
+  if (now - _lastBackupTime > BACKUP_INTERVAL) {
+    _lastBackupTime = now;
+    writeFileSync(DB_BACKUP_PATH, json);
   }
+}
+
+function loadDB() {
+  // Try main db file
+  if (existsSync(DB_PATH)) {
+    try {
+      const data = JSON.parse(readFileSync(DB_PATH, 'utf-8'));
+      if (data && data.users) {
+        console.log(`✅ Database loaded: ${data.users.length} users, ${data.servers.length} servers`);
+        return data;
+      }
+    } catch (e) {
+      console.error('⚠️ Failed to read db.json:', e.message);
+    }
+  }
+  // Try backup
+  if (existsSync(DB_BACKUP_PATH)) {
+    try {
+      const data = JSON.parse(readFileSync(DB_BACKUP_PATH, 'utf-8'));
+      if (data && data.users) {
+        console.log(`🔄 Restored from backup: ${data.users.length} users, ${data.servers.length} servers`);
+        writeFileSync(DB_PATH, JSON.stringify(data, null, 2));
+        return data;
+      }
+    } catch (e) {
+      console.error('⚠️ Failed to read backup:', e.message);
+    }
+  }
+  console.log('🆕 No existing data found, initializing fresh database');
   return initDB();
 }
 
@@ -86,14 +129,21 @@ if (!db.friendRequests) { db.friendRequests = []; saveDB(); }
 if (!db.dmChannels) { db.dmChannels = []; saveDB(); }
 if (!db.dmMessages) { db.dmMessages = []; saveDB(); }
 
-function saveDB(data) {
-  writeFileSync(DB_PATH, JSON.stringify(data || db, null, 2));
-}
-
 function genId() {
   db.nextId++;
   saveDB();
   return String(db.nextId);
+}
+
+// Check if a member has a specific permission (admin perms or custom role perms)
+function memberHasPerm(server, member, perm) {
+  if (!server || !member) return false;
+  if (server.ownerId === member.userId) return true;
+  if (member.role === 'admin' && server.adminPermissions?.[perm]) return true;
+  // Check custom role permissions
+  const customRole = (server.customRoles || []).find(r => r.id === member.role);
+  if (customRole && customRole.permissions?.[perm]) return true;
+  return false;
 }
 
 // ── Express ──
@@ -101,8 +151,8 @@ const app = express();
 const httpServer = createServer(app);
 app.use(express.json());
 
-// ── File uploads ──
-const uploadsDir = join(__dirname, 'uploads');
+// ── File uploads (persistent in production) ──
+const uploadsDir = join(DATA_DIR, 'uploads');
 mkdirSync(uploadsDir, { recursive: true });
 app.use('/uploads', express.static(uploadsDir));
 
@@ -489,10 +539,8 @@ app.get('/api/servers/:id/channels', auth, (req, res) => {
 app.post('/api/servers/:id/channels', auth, (req, res) => {
   const server = db.servers.find(s => s.id === req.params.id);
   if (!server) return res.status(404).json({ error: 'Server not found' });
-  const isOwner = server.ownerId === req.user.id;
   const memberRec = db.members.find(m => m.serverId === req.params.id && m.userId === req.user.id);
-  const isAdmin = memberRec && memberRec.role === 'admin';
-  if (!isOwner && !(isAdmin && server.adminPermissions?.createChannels)) return res.status(403).json({ error: 'No permission' });
+  if (!memberHasPerm(server, memberRec, 'createChannels')) return res.status(403).json({ error: 'No permission' });
   const { name, type } = req.body;
   if (!name || name.length < 2) return res.status(400).json({ error: 'Channel name required' });
   const channelName = name.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9а-яёіїґүөәңғқһ-]/g, '').replace(/^-+|-+$/g, '').replace(/-{2,}/g, '-');
@@ -510,10 +558,14 @@ app.delete('/api/channels/:id', auth, (req, res) => {
   const channel = db.channels.find(c => c.id === req.params.id);
   if (!channel) return res.status(404).json({ error: 'Channel not found' });
   const server = db.servers.find(s => s.id === channel.serverId);
-  const isOwner = server && server.ownerId === req.user.id;
   const memberRec = server && db.members.find(m => m.serverId === server.id && m.userId === req.user.id);
-  const isAdmin = memberRec && memberRec.role === 'admin';
-  if (!isOwner && !(isAdmin && server?.adminPermissions?.deleteChannels)) return res.status(403).json({ error: 'No permission to delete channels' });
+  if (!memberHasPerm(server, memberRec, 'deleteChannels')) return res.status(403).json({ error: 'No permission to delete channels' });
+  // If voice channel, disconnect all users in it
+  if (channel.type === 'voice' && voiceState.has(req.params.id)) {
+    io.to('voice:' + req.params.id).emit('voice-channel-deleted', { channelId: req.params.id });
+    voiceState.delete(req.params.id);
+    io.to('server:' + channel.serverId).emit('voice-state-update', { channelId: req.params.id, users: [] });
+  }
   // Emit before removing so clients still have room membership
   io.to('server:' + channel.serverId).emit('channel-deleted', { id: req.params.id, serverId: channel.serverId });
   db.channels = db.channels.filter(c => c.id !== req.params.id);
@@ -540,24 +592,91 @@ app.get('/api/servers/:id/members', auth, (req, res) => {
   res.json(members);
 });
 
-// Set member role (admin/user)
+// Set member role (admin/user/customRoleId)
 app.post('/api/servers/:id/members/:userId/role', auth, (req, res) => {
   const server = db.servers.find(s => s.id === req.params.id);
   if (!server) return res.status(404).json({ error: 'Server not found' });
   const isOwner = server.ownerId === req.user.id;
   const reqMember = db.members.find(m => m.serverId === req.params.id && m.userId === req.user.id);
-  const isAdmin = reqMember && reqMember.role === 'admin';
-  if (!isOwner && !(isAdmin && server.adminPermissions?.manageRoles)) return res.status(403).json({ error: 'No permission to manage roles' });
+  if (!memberHasPerm(server, reqMember, 'manageRoles')) return res.status(403).json({ error: 'No permission to manage roles' });
   if (req.params.userId === req.user.id) return res.status(400).json({ error: 'Cannot change own role' });
   const member = db.members.find(m => m.serverId === req.params.id && m.userId === req.params.userId);
   if (!member) return res.status(404).json({ error: 'Member not found' });
-  const { role } = req.body; // 'admin' or 'user'
-  if (role !== 'admin' && role !== 'user') return res.status(400).json({ error: 'Invalid role' });
+  const { role } = req.body; // 'admin', 'user', or custom role id
+  const customRoles = server.customRoles || [];
+  if (role !== 'admin' && role !== 'user' && !customRoles.find(r => r.id === role)) return res.status(400).json({ error: 'Invalid role' });
+  const oldRole = member.role;
   member.role = role;
   saveDB();
-  // Notify all server members
   io.to('server:' + req.params.id).emit('member-role-updated', { serverId: req.params.id, userId: req.params.userId, role });
+  // System message for role change
+  const targetUser = db.users.find(u => u.id === req.params.userId);
+  const generalCh = db.channels.find(c => c.serverId === req.params.id && c.type !== 'voice');
+  if (generalCh && targetUser) {
+    let roleLabel = role;
+    if (role === 'admin') roleLabel = '🛡️ Admin';
+    else if (role === 'user') roleLabel = 'Member';
+    else {
+      const cr = customRoles.find(r => r.id === role);
+      if (cr) roleLabel = cr.name;
+    }
+    const sysMsg = { id: 'msg' + genId(), channelId: generalCh.id, type: 'system', content: `${req.user.username} изменил(а) роль ${targetUser.username} на ${roleLabel}`, createdAt: new Date().toISOString() };
+    db.messages.push(sysMsg);
+    saveDB();
+    io.to('channel:' + generalCh.id).emit('new-message', sysMsg);
+  }
   res.json({ ok: true, role });
+});
+
+// CRUD for custom roles
+app.get('/api/servers/:id/roles', auth, (req, res) => {
+  const server = db.servers.find(s => s.id === req.params.id);
+  if (!server) return res.status(404).json({ error: 'Server not found' });
+  res.json(server.customRoles || []);
+});
+
+app.post('/api/servers/:id/roles', auth, (req, res) => {
+  const server = db.servers.find(s => s.id === req.params.id);
+  if (!server) return res.status(404).json({ error: 'Server not found' });
+  if (server.ownerId !== req.user.id) return res.status(403).json({ error: 'Only owner can create roles' });
+  const { name, permissions, color } = req.body;
+  if (!name || name.length < 1) return res.status(400).json({ error: 'Role name required' });
+  if (!server.customRoles) server.customRoles = [];
+  const role = { id: 'r' + genId(), name, permissions: permissions || {}, color: color || '#99aab5' };
+  server.customRoles.push(role);
+  saveDB();
+  io.to('server:' + server.id).emit('server-roles-updated', { serverId: server.id, customRoles: server.customRoles });
+  res.json(role);
+});
+
+app.put('/api/servers/:id/roles/:roleId', auth, (req, res) => {
+  const server = db.servers.find(s => s.id === req.params.id);
+  if (!server) return res.status(404).json({ error: 'Server not found' });
+  if (server.ownerId !== req.user.id) return res.status(403).json({ error: 'Only owner can edit roles' });
+  const role = (server.customRoles || []).find(r => r.id === req.params.roleId);
+  if (!role) return res.status(404).json({ error: 'Role not found' });
+  if (req.body.name) role.name = req.body.name;
+  if (req.body.permissions) role.permissions = req.body.permissions;
+  if (req.body.color) role.color = req.body.color;
+  saveDB();
+  io.to('server:' + server.id).emit('server-roles-updated', { serverId: server.id, customRoles: server.customRoles });
+  res.json(role);
+});
+
+app.delete('/api/servers/:id/roles/:roleId', auth, (req, res) => {
+  const server = db.servers.find(s => s.id === req.params.id);
+  if (!server) return res.status(404).json({ error: 'Server not found' });
+  if (server.ownerId !== req.user.id) return res.status(403).json({ error: 'Only owner can delete roles' });
+  if (!server.customRoles) return res.status(404).json({ error: 'Role not found' });
+  const idx = server.customRoles.findIndex(r => r.id === req.params.roleId);
+  if (idx < 0) return res.status(404).json({ error: 'Role not found' });
+  server.customRoles.splice(idx, 1);
+  // Reset members with this role back to 'user'
+  db.members.filter(m => m.serverId === server.id && m.role === req.params.roleId).forEach(m => { m.role = 'user'; });
+  saveDB();
+  io.to('server:' + server.id).emit('server-roles-updated', { serverId: server.id, customRoles: server.customRoles });
+  io.to('server:' + server.id).emit('role-deleted-reset', { serverId: server.id, roleId: req.params.roleId });
+  res.json({ ok: true });
 });
 
 // Update admin permissions for server
@@ -565,7 +684,7 @@ app.put('/api/servers/:id/permissions', auth, (req, res) => {
   const server = db.servers.find(s => s.id === req.params.id);
   if (!server) return res.status(404).json({ error: 'Server not found' });
   if (server.ownerId !== req.user.id) return res.status(403).json({ error: 'Only owner can change permissions' });
-  const validPerms = ['deleteMessages', 'deleteChannels', 'createChannels', 'kickMembers', 'manageRoles', 'bypassSlowmode'];
+  const validPerms = ['deleteMessages', 'deleteChannels', 'createChannels', 'kickMembers', 'manageRoles', 'bypassSlowmode', 'clearChannel'];
   const perms = {};
   for (const p of validPerms) perms[p] = !!req.body[p];
   server.adminPermissions = perms;
@@ -580,14 +699,23 @@ app.post('/api/servers/:id/members/:userId/kick', auth, (req, res) => {
   if (!server) return res.status(404).json({ error: 'Server not found' });
   const reqMember = db.members.find(m => m.serverId === req.params.id && m.userId === req.user.id);
   const isOwner = server.ownerId === req.user.id;
-  const isAdmin = reqMember && reqMember.role === 'admin';
-  if (!isOwner && !(isAdmin && server.adminPermissions?.kickMembers)) return res.status(403).json({ error: 'No permission' });
+  if (!memberHasPerm(server, reqMember, 'kickMembers')) return res.status(403).json({ error: 'No permission' });
   if (req.params.userId === server.ownerId) return res.status(400).json({ error: 'Cannot kick the owner' });
-  // Admins can't kick other admins
+  // Non-owners can't kick admins
   const targetMember = db.members.find(m => m.serverId === req.params.id && m.userId === req.params.userId);
   if (!isOwner && targetMember?.role === 'admin') return res.status(403).json({ error: 'Cannot kick an admin' });
+  // Get kicked user info before removing
+  const kickedUser = db.users.find(u => u.id === req.params.userId);
   db.members = db.members.filter(m => !(m.serverId === req.params.id && m.userId === req.params.userId));
   saveDB();
+  // System message for kick
+  const generalCh = db.channels.find(c => c.serverId === req.params.id && c.type !== 'voice');
+  if (generalCh && kickedUser) {
+    const sysMsg = { id: 'msg' + genId(), channelId: generalCh.id, type: 'system', content: `${req.user.username} исключил(а) ${kickedUser.username} с сервера`, createdAt: new Date().toISOString() };
+    db.messages.push(sysMsg);
+    saveDB();
+    io.to('channel:' + generalCh.id).emit('new-message', sysMsg);
+  }
   // Notify kicked user
   const targetSockets = onlineUsers.get(req.params.userId);
   if (targetSockets) {
@@ -656,7 +784,15 @@ app.get('/api/dm-channels/:id/pinned', auth, (req, res) => {
 });
 
 // ── Socket.io (early init for onlineUsers) ──
-const io = new Server(httpServer, { cors: { origin: '*' } });
+const io = new Server(httpServer, {
+  cors: { origin: '*' },
+  pingTimeout: 30000,
+  pingInterval: 10000,
+  connectionStateRecovery: {
+    maxDisconnectionDuration: 2 * 60 * 1000, // 2 minutes
+    skipMiddlewares: false,
+  },
+});
 const onlineUsers = new Map(); // userId -> Set<socketId>
 
 // ── Friends Routes ──
@@ -990,13 +1126,11 @@ app.put('/api/messages/:id', auth, (req, res) => {
 app.delete('/api/messages/:id', auth, (req, res) => {
   const msg = db.messages.find(m => m.id === req.params.id);
   if (!msg) return res.status(404).json({ error: 'Message not found' });
-  // Check if user is owner or admin with deleteMessages permission
+  // Check if user is owner or admin/custom-role with deleteMessages permission
   const channel = db.channels.find(c => c.id === msg.channelId);
   const server = channel && db.servers.find(s => s.id === channel.serverId);
-  const isOwner = server && server.ownerId === req.user.id;
   const memberRec = server && db.members.find(m => m.serverId === server.id && m.userId === req.user.id);
-  const isAdmin = memberRec && memberRec.role === 'admin';
-  const canDeleteOthers = isOwner || (isAdmin && server.adminPermissions?.deleteMessages);
+  const canDeleteOthers = memberHasPerm(server, memberRec, 'deleteMessages');
   const isAuthor = msg.userId === req.user.id;
   if (!isAuthor && !canDeleteOthers) return res.status(403).json({ error: 'Not your message' });
   if (isAuthor || canDeleteOthers) {
@@ -1016,6 +1150,96 @@ app.delete('/api/messages/:id', auth, (req, res) => {
     }
   }
   res.json({ ok: true });
+});
+
+// Clear all messages in a channel
+app.post('/api/channels/:id/clear', auth, (req, res) => {
+  const channel = db.channels.find(c => c.id === req.params.id);
+  if (!channel) return res.status(404).json({ error: 'Channel not found' });
+  const server = db.servers.find(s => s.id === channel.serverId);
+  const memberRec = server && db.members.find(m => m.serverId === server.id && m.userId === req.user.id);
+  if (!memberHasPerm(server, memberRec, 'clearChannel')) return res.status(403).json({ error: 'No permission' });
+  const count = db.messages.filter(m => m.channelId === channel.id && !m.deleted).length;
+  db.messages = db.messages.filter(m => m.channelId !== channel.id);
+  saveDB();
+  io.to('channel:' + channel.id).emit('channel-cleared', { channelId: channel.id });
+  res.json({ ok: true, cleared: count });
+});
+
+// Bulk delete messages
+app.delete('/api/channels/:id/messages/bulk', auth, (req, res) => {
+  const { messageIds, mode } = req.body; // mode: 'forAll' | 'forMe'
+  if (!Array.isArray(messageIds) || messageIds.length === 0) return res.status(400).json({ error: 'No messages specified' });
+  if (messageIds.length > 100) return res.status(400).json({ error: 'Max 100 messages at once' });
+  const channel = db.channels.find(c => c.id === req.params.id);
+  if (!channel) return res.status(404).json({ error: 'Channel not found' });
+  const server = db.servers.find(s => s.id === channel.serverId);
+  const memberRec = server && db.members.find(m => m.serverId === server.id && m.userId === req.user.id);
+  const canDeleteOthers = memberHasPerm(server, memberRec, 'deleteMessages');
+  const deleted = [];
+  const hidden = [];
+  for (const msgId of messageIds) {
+    const msg = db.messages.find(m => m.id === msgId && m.channelId === channel.id);
+    if (!msg || msg.deleted) continue;
+    if (mode === 'forMe') {
+      if (!msg.hiddenFor) msg.hiddenFor = [];
+      if (!msg.hiddenFor.includes(req.user.id)) msg.hiddenFor.push(req.user.id);
+      hidden.push(msg.id);
+    } else {
+      const isAuthor = msg.userId === req.user.id;
+      if (!isAuthor && !canDeleteOthers) continue;
+      msg.deleted = true;
+      msg.deletedAt = new Date().toISOString();
+      delete msg.content;
+      delete msg.attachment;
+      deleted.push(msg.id);
+    }
+  }
+  if (deleted.length > 0 || hidden.length > 0) {
+    saveDB();
+    for (const id of deleted) {
+      io.to('channel:' + channel.id).emit('message-deleted-for-all', { id });
+    }
+  }
+  res.json({ ok: true, deleted: deleted.length, hidden: hidden.length });
+});
+
+// Bulk delete DM messages
+app.delete('/api/dm-channels/:id/messages/bulk', auth, (req, res) => {
+  const { messageIds, mode } = req.body; // mode: 'forAll' | 'forMe'
+  if (!Array.isArray(messageIds) || messageIds.length === 0) return res.status(400).json({ error: 'No messages specified' });
+  if (messageIds.length > 100) return res.status(400).json({ error: 'Max 100 messages at once' });
+  const dm = db.dmChannels.find(d => d.id === req.params.id && d.participants.includes(req.user.id));
+  if (!dm) return res.status(404).json({ error: 'DM not found' });
+  const deleted = [];
+  const hidden = [];
+  const fifteenMin = 15 * 60 * 1000;
+  for (const msgId of messageIds) {
+    const msg = db.dmMessages.find(m => m.id === msgId && m.dmChannelId === dm.id);
+    if (!msg || msg.deleted) continue;
+    if (mode === 'forMe') {
+      if (!msg.hiddenFor) msg.hiddenFor = [];
+      if (!msg.hiddenFor.includes(req.user.id)) msg.hiddenFor.push(req.user.id);
+      hidden.push(msg.id);
+    } else {
+      // Only author can delete for all, and only within 15 min
+      if (msg.userId !== req.user.id) continue;
+      const age = Date.now() - new Date(msg.createdAt).getTime();
+      if (age >= fifteenMin) continue;
+      msg.deleted = true;
+      msg.deletedAt = new Date().toISOString();
+      delete msg.content;
+      delete msg.attachment;
+      deleted.push(msg.id);
+    }
+  }
+  if (deleted.length > 0 || hidden.length > 0) {
+    saveDB();
+    for (const id of deleted) {
+      io.to('dm:' + dm.id).emit('dm-message-deleted-for-all', { id });
+    }
+  }
+  res.json({ ok: true, deleted: deleted.length, hidden: hidden.length });
 });
 
 app.post('/api/messages/:id/pin', auth, (req, res) => {
@@ -1067,6 +1291,51 @@ app.post('/api/dm-messages/:id/pin', auth, (req, res) => {
     io.to('dm:' + msg.dmChannelId).emit('dm-message-pinned', { id: msg.id, pinned: msg.pinned });
     res.json({ ok: true, pinned: msg.pinned });
   }
+});
+
+// ── Reactions ──
+app.post('/api/messages/:id/react', auth, (req, res) => {
+  const msg = db.messages.find(m => m.id === req.params.id);
+  if (!msg) return res.status(404).json({ error: 'Message not found' });
+  const { emoji } = req.body;
+  if (!emoji) return res.status(400).json({ error: 'Emoji required' });
+  if (!msg.reactions) msg.reactions = [];
+  const existing = msg.reactions.find(r => r.emoji === emoji);
+  if (existing) {
+    if (existing.users.includes(req.user.id)) {
+      existing.users = existing.users.filter(u => u !== req.user.id);
+      if (existing.users.length === 0) msg.reactions = msg.reactions.filter(r => r.emoji !== emoji);
+    } else {
+      existing.users.push(req.user.id);
+    }
+  } else {
+    msg.reactions.push({ emoji, users: [req.user.id] });
+  }
+  saveDB();
+  io.to('channel:' + msg.channelId).emit('message-reacted', { id: msg.id, reactions: msg.reactions });
+  res.json({ ok: true, reactions: msg.reactions });
+});
+
+app.post('/api/dm-messages/:id/react', auth, (req, res) => {
+  const msg = db.dmMessages.find(m => m.id === req.params.id);
+  if (!msg) return res.status(404).json({ error: 'Message not found' });
+  const { emoji } = req.body;
+  if (!emoji) return res.status(400).json({ error: 'Emoji required' });
+  if (!msg.reactions) msg.reactions = [];
+  const existing = msg.reactions.find(r => r.emoji === emoji);
+  if (existing) {
+    if (existing.users.includes(req.user.id)) {
+      existing.users = existing.users.filter(u => u !== req.user.id);
+      if (existing.users.length === 0) msg.reactions = msg.reactions.filter(r => r.emoji !== emoji);
+    } else {
+      existing.users.push(req.user.id);
+    }
+  } else {
+    msg.reactions.push({ emoji, users: [req.user.id] });
+  }
+  saveDB();
+  io.to('dm:' + msg.dmChannelId).emit('dm-message-reacted', { id: msg.id, reactions: msg.reactions });
+  res.json({ ok: true, reactions: msg.reactions });
 });
 
 app.put('/api/dm-messages/:id', auth, (req, res) => {
@@ -1288,9 +1557,7 @@ io.on('connection', (socket) => {
     if (channel.slowmode && channel.slowmode > 0) {
       const server = db.servers.find(s => s.id === channel.serverId);
       const member = db.members.find(m => m.serverId === channel.serverId && m.userId === uid);
-      const isOwner = server && server.ownerId === uid;
-      const isAdmin = member && member.role === 'admin';
-      if (!isOwner && !(isAdmin && server?.adminPermissions?.bypassSlowmode)) {
+      if (!memberHasPerm(server, member, 'bypassSlowmode')) {
         const lastMsg = [...db.messages].reverse().find(m => m.channelId === channelId && m.userId === uid && m.type !== 'system');
         if (lastMsg) {
           const elapsed = (Date.now() - new Date(lastMsg.createdAt).getTime()) / 1000;
@@ -1398,6 +1665,25 @@ io.on('connection', (socket) => {
     socket.emit('voice-peers', { channelId, peers: existingUsers });
   });
 
+  // Handle reconnection while in voice — update socketId
+  socket.on('rejoin-voice', ({ channelId }) => {
+    if (!channelId) return;
+    const channel = db.channels.find(c => c.id === channelId && c.type === 'voice');
+    if (!channel) return;
+    const users = voiceState.get(channelId);
+    if (users && users.has(uid)) {
+      // Update socket ID for the reconnected user
+      const userData = users.get(uid);
+      const oldSocketId = userData.socketId;
+      userData.socketId = socket.id;
+      socket.join('voice:' + channelId);
+      io.to('server:' + channel.serverId).emit('voice-state-update', { channelId, users: getVoiceUsers(channelId) });
+      // Re-send peers list so client can re-establish WebRTC
+      const existingUsers = getVoiceUsers(channelId).filter(u => u.id !== uid);
+      socket.emit('voice-peers', { channelId, peers: existingUsers });
+    }
+  });
+
   socket.on('voice-leave', () => {
     for (const [chId, users] of voiceState) {
       if (users.has(uid)) {
@@ -1458,23 +1744,35 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnect', () => {
-    // Clean up voice state on disconnect
-    for (const [chId, users] of voiceState) {
-      if (users.has(uid)) {
-        users.delete(uid);
-        if (users.size === 0) voiceState.delete(chId);
-        const ch = db.channels.find(c => c.id === chId);
-        if (ch) io.to('server:' + ch.serverId).emit('voice-state-update', { channelId: chId, users: getVoiceUsers(chId) });
-        break;
+    // Delay voice cleanup to allow reconnection (15 seconds grace period)
+    setTimeout(() => {
+      // Check if user reconnected (has a new socket in onlineUsers)
+      const currentSockets = onlineUsers.get(uid);
+      if (currentSockets && currentSockets.size > 0) return; // User reconnected, skip cleanup
+
+      for (const [chId, users] of voiceState) {
+        if (users.has(uid)) {
+          users.delete(uid);
+          if (users.size === 0) voiceState.delete(chId);
+          const ch = db.channels.find(c => c.id === chId);
+          if (ch) io.to('server:' + ch.serverId).emit('voice-state-update', { channelId: chId, users: getVoiceUsers(chId) });
+          break;
+        }
       }
-    }
+    }, 15000);
 
     const sockets = onlineUsers.get(uid);
     if (sockets) {
       sockets.delete(socket.id);
       if (sockets.size === 0) {
-        onlineUsers.delete(uid);
-        io.emit('user-offline', { userId: uid });
+        // Delay offline broadcast to allow reconnection
+        setTimeout(() => {
+          const current = onlineUsers.get(uid);
+          if (!current || current.size === 0) {
+            onlineUsers.delete(uid);
+            io.emit('user-offline', { userId: uid });
+          }
+        }, 5000);
       }
     }
   });

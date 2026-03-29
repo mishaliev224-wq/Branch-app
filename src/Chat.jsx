@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { io } from 'socket.io-client'
 import { useAuth, API } from './App.jsx'
 import { t, getLanguage, setLanguage as setLangStorage } from './i18n.js'
@@ -423,6 +423,16 @@ export default function Chat() {
   const [messages, setMessages] = useState([])
   const [members, setMembers] = useState([])
   const [input, setInput] = useState('')
+  const [showEmojiPicker, setShowEmojiPicker] = useState(false)
+  const [emojiSearch, setEmojiSearch] = useState('')
+  const [emojiCategory, setEmojiCategory] = useState('smileys')
+  const emojiPickerRef = useRef(null)
+  const [hoveredMsg, setHoveredMsg] = useState(null)
+  const [reactionPickerMsg, setReactionPickerMsg] = useState(null) // { id, isDM, x, y }
+  const [reactionSearch, setReactionSearch] = useState('')
+  const [reactionCategory, setReactionCategory] = useState('smileys')
+  const reactionPickerRef = useRef(null)
+  const [reactionUsersPopup, setReactionUsersPopup] = useState(null) // { emoji, users: [{id,username,avatarColor}], x, y }
   const [showCreateServer, setShowCreateServer] = useState(false)
   const [showCreateChannel, setShowCreateChannel] = useState(false)
   const [channelsCollapsed, setChannelsCollapsed] = useState(false)
@@ -430,6 +440,8 @@ export default function Chat() {
   const [serverSettingsName, setServerSettingsName] = useState('')
   const [serverSettingsTab, setServerSettingsTab] = useState('general')
   const [memberSearchQuery, setMemberSearchQuery] = useState('')
+  const [editingRole, setEditingRole] = useState(null) // { id?, name, permissions, color } for create/edit
+  const [roleAssignMember, setRoleAssignMember] = useState(null) // member being assigned a role
   const [srvMemberSearch, setSrvMemberSearch] = useState('')
   const [showChannelSettings, setShowChannelSettings] = useState(null)
   const [channelSettingsName, setChannelSettingsName] = useState('')
@@ -467,6 +479,10 @@ export default function Chat() {
   const [streamerMode, setStreamerMode] = useState(() => localStorage.getItem('streamerMode') === 'true')
   const [, forceUpdate] = useState(0)
   const [showFriends, setShowFriends] = useState(true)
+  const [mobileNav, setMobileNav] = useState(false) // mobile sidebar open
+  const [mobileInChat, setMobileInChat] = useState(false) // mobile: full-screen chat view
+  const [mobileTab, setMobileTab] = useState('home') // home, servers, notifications, profile
+  const isMobile = typeof window !== 'undefined' && window.innerWidth <= 768
   const [friendsTab, setFriendsTab] = useState('all')
   const [friendsSearch, setFriendsSearch] = useState('')
   const [friends, setFriends] = useState([])
@@ -490,6 +506,7 @@ export default function Chat() {
   const messagesAreaRef = useRef(null)
   const [showScrollBtn, setShowScrollBtn] = useState(false)
   const typingTimeout = useRef(null)
+  const typingTimers = useRef({})
   const userPopupRef = useRef(null)
   const fileInputRef = useRef(null)
   const [showAttachMenu, setShowAttachMenu] = useState(false)
@@ -521,6 +538,8 @@ export default function Chat() {
   const [inviteSending, setInviteSending] = useState({})
   const [msgCtx, setMsgCtx] = useState(null) // { msg, x, y, isDM }
   const [memberCtx, setMemberCtx] = useState(null) // { member, x, y }
+  const [selectMode, setSelectMode] = useState(false)
+  const [selectedMsgs, setSelectedMsgs] = useState(new Set())
   const msgCtxRef = useRef(null)
   const [editingMsg, setEditingMsg] = useState(null) // { id, content }
   const editInputRef = useRef(null)
@@ -564,10 +583,14 @@ export default function Chat() {
   const [unreadDMs, setUnreadDMs] = useState({}) // { dmChannelId: count }
   const activeChannelRef = useRef(null)
   const activeDMRef = useRef(null)
+  const serversRef = useRef([])
+  const channelsRef = useRef([])
 
   // Keep refs in sync
   useEffect(() => { activeChannelRef.current = activeChannel }, [activeChannel])
   useEffect(() => { activeDMRef.current = activeDM }, [activeDM])
+  useEffect(() => { serversRef.current = servers }, [servers])
+  useEffect(() => { channelsRef.current = channels }, [channels])
 
   // Check if DM partner has blocked the current user
   useEffect(() => {
@@ -582,6 +605,8 @@ export default function Chat() {
   const [voiceChannelsCollapsed, setVoiceChannelsCollapsed] = useState(false)
   const [voiceUsers, setVoiceUsers] = useState({}) // { channelId: [{ id, username, avatarColor, tag, socketId }] }
   const [voiceChannel, setVoiceChannel] = useState(null) // current voice channel object or null
+  const voiceChannelRef = useRef(null)
+  useEffect(() => { voiceChannelRef.current = voiceChannel }, [voiceChannel])
   const [voiceMuted, setVoiceMuted] = useState(false)
   const [voiceDeafened, setVoiceDeafened] = useState(false)
   const [newChannelType, setNewChannelType] = useState('text')
@@ -613,7 +638,8 @@ export default function Chat() {
   const [screenShareOn, setScreenShareOn] = useState(false)
   const cameraStream = useRef(null)
   const screenStream = useRef(null)
-  const [remoteVideoStreams, setRemoteVideoStreams] = useState({}) // socketId -> MediaStream
+  const [remoteVideoStreams, setRemoteVideoStreams] = useState({}) // socketId -> MediaStream (camera)
+  const [remoteScreenStreams, setRemoteScreenStreams] = useState({}) // socketId -> MediaStream (screen share)
   const videoRefs = useRef({}) // socketId -> video element
   const localVideoRef = useRef(null)
   const localScreenRef = useRef(null)
@@ -628,25 +654,50 @@ export default function Chat() {
   const activeServerRef = useRef(null)
   useEffect(() => { activeServerRef.current = activeServer }, [activeServer])
 
+  // ── Preloaded sound cache ──
+  const soundCache = useRef({})
+  useEffect(() => {
+    const files = {
+      'sound_send': '/sound_send.wav',
+      'voice_connect': '/voice_connect.wav',
+      'voice_disconnect': '/voice_disconnect.wav',
+      'unmute': '/unmute.wav',
+      'mute_toggle': '/mute_toggle.m4a',
+    }
+    Object.entries(files).forEach(([key, src]) => {
+      const a = new Audio(src)
+      a.preload = 'auto'
+      a.load()
+      soundCache.current[key] = a
+    })
+  }, [])
+
+  const playCachedSound = useCallback((key, volume = 1) => {
+    try {
+      const cached = soundCache.current[key]
+      if (cached) {
+        const clone = cached.cloneNode()
+        clone.volume = Math.min(volume, 1)
+        clone.play().catch(() => {})
+      }
+    } catch {}
+  }, [])
+
   // ── App sounds ──
   const playSoundRef = useRef(null)
   const playSound = useCallback((type) => {
     try {
+      if (type === 'message-send') {
+        playCachedSound('sound_send', Math.min(soundVolume / 100, 1))
+        return
+      }
       const ctx = new (window.AudioContext || window.webkitAudioContext)()
       const osc = ctx.createOscillator()
       const gain = ctx.createGain()
       osc.connect(gain)
       gain.connect(ctx.destination)
       const vol = (soundVolume / 100) * 0.15
-      if (type === 'message-send') {
-        osc.disconnect()
-        gain.disconnect()
-        ctx.close()
-        const a = new Audio('/sound_send.wav')
-        a.volume = Math.min(soundVolume / 100, 1)
-        a.play().catch(() => {})
-        return
-      } else if (type === 'message-receive') {
+      if (type === 'message-receive') {
         osc.type = 'sine'
         osc.frequency.setValueAtTime(587, ctx.currentTime)
         osc.frequency.setValueAtTime(784, ctx.currentTime + 0.08)
@@ -674,14 +725,53 @@ export default function Chat() {
       }
       setTimeout(() => ctx.close(), 500)
     } catch {}
-  }, [soundVolume])
+  }, [soundVolume, playCachedSound])
   useEffect(() => { playSoundRef.current = playSound }, [playSound])
 
   // Connect socket
   useEffect(() => {
     const token = localStorage.getItem('token')
-    socket = io({ auth: { token } })
+    socket = io({
+      auth: { token },
+      reconnection: true,
+      reconnectionAttempts: Infinity,
+      reconnectionDelay: 1000,
+      reconnectionDelayMax: 10000,
+      timeout: 20000,
+    })
     window.__socket = socket
+
+    // Connection error handling
+    socket.on('connect_error', (err) => {
+      console.warn('[Socket] connect_error:', err.message)
+      if (err.message === 'Invalid token' || err.message === 'Auth required' || err.message === 'User not found') {
+        // Token expired or invalid — re-login
+        localStorage.removeItem('token')
+        window.location.reload()
+      }
+    })
+
+    // Reconnection — re-join active rooms
+    socket.on('connect', () => {
+      console.log('[Socket] connected:', socket.id)
+      // Re-join the active channel room
+      if (activeChannelRef.current?.id) {
+        socket.emit('join-channel', activeChannelRef.current.id)
+      }
+      // Re-join server rooms (server does this on connection, but just in case)
+      // Re-join voice if was in call
+      if (voiceChannelRef.current) {
+        socket.emit('rejoin-voice', { channelId: voiceChannelRef.current.id })
+      }
+    })
+
+    socket.on('disconnect', (reason) => {
+      console.warn('[Socket] disconnected:', reason)
+      if (reason === 'io server disconnect') {
+        // Server forced disconnect — reconnect manually
+        socket.connect()
+      }
+    })
 
     socket.on('new-message', (msg) => {
       setMessages(prev => [...prev, msg])
@@ -695,10 +785,14 @@ export default function Chat() {
       // Toast notification (if not muted)
       const muted = mutedChannelsRef.current[channelId]
       if (!muted || muted <= Date.now()) {
+        const srv = serversRef.current?.find(s => s.id === serverId)
+        const ch = channelsRef.current?.find(c => c.id === channelId)
         addToast({
           type: 'channel',
           channelId,
           serverId,
+          serverName: srv?.name || '',
+          channelName: ch?.name || '',
           username: username || 'User',
           avatarColor: avatarColor || '#666',
           content: attachment ? (content || t('msg.attachment')) : (content || ''),
@@ -712,9 +806,11 @@ export default function Chat() {
         if (prev.find(u => u.id === typingUser.id)) return prev
         return [...prev, typingUser]
       })
-      setTimeout(() => {
+      if (typingTimers.current[typingUser.id]) clearTimeout(typingTimers.current[typingUser.id])
+      typingTimers.current[typingUser.id] = setTimeout(() => {
         setTypingUsers(prev => prev.filter(u => u.id !== typingUser.id))
-      }, 3000)
+        delete typingTimers.current[typingUser.id]
+      }, 6000)
     })
 
     socket.on('user-online', ({ userId }) => {
@@ -809,6 +905,40 @@ export default function Chat() {
       })
     })
 
+    socket.on('voice-channel-deleted', ({ channelId }) => {
+      // If we're in the deleted voice channel, leave it
+      setVoiceChannel(prev => {
+        if (prev?.id === channelId) {
+          // Clean up peer connections and streams
+          for (const [sid, pc] of Object.entries(peerConnections.current)) {
+            pc.close()
+            document.getElementById('voice-audio-' + sid)?.remove()
+          }
+          peerConnections.current = {}
+          if (localStream.current) {
+            if (localStream.current._rawStream) localStream.current._rawStream.getTracks().forEach(t => t.stop())
+            localStream.current.getTracks().forEach(t => t.stop())
+            localStream.current = null
+          }
+          if (cameraStream.current) { cameraStream.current.getTracks().forEach(t => t.stop()); cameraStream.current = null }
+          if (screenStream.current) { screenStream.current.getTracks().forEach(t => t.stop()); screenStream.current = null }
+          setCameraOn(false)
+          setScreenShareOn(false)
+          setRemoteVideoStreams({})
+          setRemoteScreenStreams({})
+          setVoiceViewChannel(null)
+          setFocusedStreamUser(null)
+          setPinnedUser(null)
+          return null
+        }
+        return prev
+      })
+    })
+
+    socket.on('channel-cleared', ({ channelId }) => {
+      setMessages(prev => activeChannel?.id === channelId ? [] : prev)
+    })
+
     socket.on('server-updated', (updated) => {
       setServers(prev => prev.map(s => s.id === updated.id ? { ...s, ...updated } : s))
       setActiveServer(prev => prev && prev.id === updated.id ? { ...prev, ...updated } : prev)
@@ -866,6 +996,13 @@ export default function Chat() {
       }
     })
 
+    socket.on('message-reacted', ({ id, reactions }) => {
+      setMessages(prev => prev.map(m => m.id === id ? { ...m, reactions } : m))
+    })
+    socket.on('dm-message-reacted', ({ id, reactions }) => {
+      setDmMessages(prev => prev.map(m => m.id === id ? { ...m, reactions } : m))
+    })
+
     socket.on('dm-channel-deleted', ({ id }) => {
       setDmChannels(prev => prev.filter(d => d.id !== id))
       setActiveDM(prev => prev?.id === id ? null : prev)
@@ -895,6 +1032,15 @@ export default function Chat() {
       setActiveServer(prev => prev && prev.id === serverId ? { ...prev, adminPermissions } : prev)
     })
 
+    socket.on('server-roles-updated', ({ serverId, customRoles }) => {
+      setServers(prev => prev.map(s => s.id === serverId ? { ...s, customRoles } : s))
+      setActiveServer(prev => prev && prev.id === serverId ? { ...prev, customRoles } : prev)
+    })
+
+    socket.on('role-deleted-reset', ({ serverId, roleId }) => {
+      setMembers(prev => prev.map(m => m.role === roleId ? { ...m, role: 'user' } : m))
+    })
+
     socket.on('voice-state-update', ({ channelId, users }) => {
       setVoiceUsers(prev => ({ ...prev, [channelId]: users }))
     })
@@ -904,47 +1050,78 @@ export default function Chat() {
       for (const peer of peers) {
         const pc = createPeerConnection(peer.socketId, socket)
         pc._remoteUserId = peer.id
+        pc._polite = false // We are the offerer (impolite)
         peerConnections.current[peer.socketId] = pc
         if (localStream.current) {
-          localStream.current.getTracks().forEach(track => pc.addTrack(track, localStream.current))
+          localStream.current.getTracks().forEach(track => {
+            if (!pc.getSenders().find(s => s.track === track)) pc.addTrack(track, localStream.current)
+          })
         }
         if (cameraStream.current) {
-          cameraStream.current.getVideoTracks().forEach(track => pc.addTrack(track, cameraStream.current))
+          cameraStream.current.getVideoTracks().forEach(track => {
+            if (!pc.getSenders().find(s => s.track === track)) pc.addTrack(track, cameraStream.current)
+          })
         }
         if (screenStream.current) {
-          screenStream.current.getVideoTracks().forEach(track => pc.addTrack(track, screenStream.current))
+          screenStream.current.getVideoTracks().forEach(track => {
+            if (!pc.getSenders().find(s => s.track === track)) pc.addTrack(track, screenStream.current)
+          })
         }
-        const offer = await pc.createOffer()
-        await pc.setLocalDescription(offer)
-        socket.emit('voice-offer', { targetSocketId: peer.socketId, offer })
+        try {
+          const offer = await pc.createOffer()
+          await pc.setLocalDescription(offer)
+          socket.emit('voice-offer', { targetSocketId: peer.socketId, offer })
+        } catch (e) { console.warn('Failed to create offer for peer', peer.socketId, e) }
       }
     })
 
     socket.on('voice-offer', async ({ fromSocketId, fromUserId, offer }) => {
-      let pc = peerConnections.current[fromSocketId]
-      if (!pc) {
-        pc = createPeerConnection(fromSocketId, socket)
-        pc._remoteUserId = fromUserId
-        peerConnections.current[fromSocketId] = pc
-        if (localStream.current) {
-          localStream.current.getTracks().forEach(track => pc.addTrack(track, localStream.current))
+      try {
+        let pc = peerConnections.current[fromSocketId]
+        if (!pc) {
+          pc = createPeerConnection(fromSocketId, socket)
+          pc._remoteUserId = fromUserId
+          pc._polite = true // We are the answerer (polite)
+          peerConnections.current[fromSocketId] = pc
+          if (localStream.current) {
+            localStream.current.getTracks().forEach(track => {
+              if (!pc.getSenders().find(s => s.track === track)) pc.addTrack(track, localStream.current)
+            })
+          }
+          if (cameraStream.current) {
+            cameraStream.current.getVideoTracks().forEach(track => {
+              if (!pc.getSenders().find(s => s.track === track)) pc.addTrack(track, cameraStream.current)
+            })
+          }
+          if (screenStream.current) {
+            screenStream.current.getVideoTracks().forEach(track => {
+              if (!pc.getSenders().find(s => s.track === track)) pc.addTrack(track, screenStream.current)
+            })
+          }
         }
-        if (cameraStream.current) {
-          cameraStream.current.getVideoTracks().forEach(track => pc.addTrack(track, cameraStream.current))
+        // Handle glare: if we're making an offer too, polite peer rolls back
+        const offerCollision = pc._makingOffer || pc.signalingState !== 'stable'
+        if (offerCollision && !pc._polite) return // impolite peer ignores incoming offer during collision
+        if (offerCollision) {
+          await Promise.all([
+            pc.setLocalDescription({ type: 'rollback' }),
+            pc.setRemoteDescription(new RTCSessionDescription(offer))
+          ].filter(Boolean))
+        } else {
+          await pc.setRemoteDescription(new RTCSessionDescription(offer))
         }
-        if (screenStream.current) {
-          screenStream.current.getVideoTracks().forEach(track => pc.addTrack(track, screenStream.current))
-        }
-      }
-      await pc.setRemoteDescription(new RTCSessionDescription(offer))
-      const answer = await pc.createAnswer()
-      await pc.setLocalDescription(answer)
-      socket.emit('voice-answer', { targetSocketId: fromSocketId, answer })
+        const answer = await pc.createAnswer()
+        await pc.setLocalDescription(answer)
+        socket.emit('voice-answer', { targetSocketId: fromSocketId, answer })
+      } catch (e) { console.warn('Failed to handle offer from', fromSocketId, e) }
     })
 
     socket.on('voice-answer', async ({ fromSocketId, answer }) => {
       const pc = peerConnections.current[fromSocketId]
-      if (pc) await pc.setRemoteDescription(new RTCSessionDescription(answer))
+      if (pc) {
+        try { await pc.setRemoteDescription(new RTCSessionDescription(answer)) }
+        catch (e) { console.warn('Failed to set answer from', fromSocketId, e) }
+      }
     })
 
     socket.on('voice-ice-candidate', ({ fromSocketId, candidate }) => {
@@ -952,16 +1129,42 @@ export default function Chat() {
       if (pc && candidate) pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(() => {})
     })
 
-    // When remote user's video track ends, clean up
+    // When remote user's video/mute state changes, update voiceUsers immediately
     socket.on('voice-video-state', ({ userId, camera, screen }) => {
-      // If user turned off all video, remove their stream when track ends
-      // The actual stream removal happens via ontrack/track.onended
+      setVoiceUsers(prev => {
+        const updated = { ...prev }
+        for (const chId of Object.keys(updated)) {
+          updated[chId] = updated[chId].map(u => u.id === userId ? { ...u, camera, screen } : u)
+        }
+        return updated
+      })
+      // Clean up remote screen stream when user stops sharing
+      if (!screen) {
+        setRemoteScreenStreams(prev => {
+          const n = { ...prev }
+          // Find socketId for this userId from peer connections
+          for (const [sockId, pc] of Object.entries(peerConnections.current)) {
+            if (pc._remoteUserId === userId) { delete n[sockId]; break }
+          }
+          return n
+        })
+      }
+      // Clean up remote camera stream when user stops camera
+      if (!camera) {
+        // If they still have screen, move screen stream from remoteVideoStreams to remoteScreenStreams if needed
+        // Otherwise just let it be — the track will be removed via renegotiation
+      }
     })
 
     socket.on('voice-sound', ({ type }) => {
-      const a = new Audio(type === 'join' ? '/voice_connect.wav' : type === 'leave' ? '/voice_disconnect.wav' : type === 'unmute' ? '/unmute.wav' : '/mute_toggle.m4a')
-      a.volume = 1
-      a.play().catch(() => {})
+      const keyMap = { join: 'voice_connect', leave: 'voice_disconnect', unmute: 'unmute', mute: 'mute_toggle' }
+      const key = keyMap[type] || 'mute_toggle'
+      const cached = soundCache.current[key]
+      if (cached) {
+        const clone = cached.cloneNode()
+        clone.volume = Math.min((soundVolume || 100) / 100 * 1.5, 1)
+        clone.play().catch(() => {})
+      }
     })
 
     return () => { socket?.disconnect() }
@@ -1006,13 +1209,23 @@ export default function Chat() {
   }, [speakingUsers, pinnedUser, focusedStreamUser])
 
   // WebRTC helper
+  const iceServers = [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:89.108.66.165:3478' },
+    { urls: 'turn:89.108.66.165:3478', username: 'branch', credential: 'branch2026turn' },
+  ]
+
   const createPeerConnection = (targetSocketId, sock) => {
-    const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] })
+    const pc = new RTCPeerConnection({ iceServers, iceTransportPolicy: 'all' })
+    pc._polite = false // will be set by caller
+    pc._makingOffer = false
     pc.onicecandidate = (e) => {
       if (e.candidate) sock.emit('voice-ice-candidate', { targetSocketId, candidate: e.candidate })
     }
     pc.ontrack = (e) => {
       if (e.track.kind === 'audio') {
+        // Remove existing audio element for this peer to avoid duplicates
+        document.getElementById('voice-audio-' + targetSocketId)?.remove()
         const audio = document.createElement('audio')
         audio.srcObject = e.streams[0]
         audio.autoplay = true
@@ -1025,33 +1238,70 @@ export default function Chat() {
         document.getElementById('voice-audio-container')?.appendChild(audio)
         // Detect speaking from remote stream
         if (remoteUserId) {
+          stopSpeakingDetection(speakingAnalysers.current[targetSocketId])
           const det = startSpeakingDetection(e.streams[0], remoteUserId)
           if (det) speakingAnalysers.current[targetSocketId] = det
         }
       } else if (e.track.kind === 'video') {
-        setRemoteVideoStreams(prev => ({ ...prev, [targetSocketId]: e.streams[0] }))
+        const stream = e.streams[0]
+        // Distinguish camera vs screen: if we already have a camera stream with a
+        // different id for this peer, the new stream is their screen share.
+        setRemoteVideoStreams(prev => {
+          const existing = prev[targetSocketId]
+          if (existing && existing.id !== stream.id) {
+            // Already have a camera stream — store new one as screen
+            setRemoteScreenStreams(p => ({ ...p, [targetSocketId]: stream }))
+            return prev
+          }
+          // First (or same) video stream — treat as camera
+          return { ...prev, [targetSocketId]: stream }
+        })
       }
     }
+    pc.onnegotiationneeded = async () => {
+      try {
+        pc._makingOffer = true
+        const offer = await pc.createOffer()
+        if (pc.signalingState !== 'stable') return
+        await pc.setLocalDescription(offer)
+        sock.emit('voice-offer', { targetSocketId, offer: pc.localDescription })
+      } catch (e) { console.warn('Negotiation needed error:', e) }
+      finally { pc._makingOffer = false }
+    }
     pc.onconnectionstatechange = () => {
-      if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
-        pc.close()
-        delete peerConnections.current[targetSocketId]
-        document.getElementById('voice-audio-' + targetSocketId)?.remove()
-        stopSpeakingDetection(speakingAnalysers.current[targetSocketId])
-        delete speakingAnalysers.current[targetSocketId]
-        setRemoteVideoStreams(prev => { const n = { ...prev }; delete n[targetSocketId]; return n })
+      if (pc.connectionState === 'failed') {
+        // Try ICE restart on failure
+        pc.restartIce()
+      }
+      if (pc.connectionState === 'disconnected') {
+        // Wait a bit before cleaning up, connection might recover
+        setTimeout(() => {
+          if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
+            pc.close()
+            delete peerConnections.current[targetSocketId]
+            document.getElementById('voice-audio-' + targetSocketId)?.remove()
+            stopSpeakingDetection(speakingAnalysers.current[targetSocketId])
+            delete speakingAnalysers.current[targetSocketId]
+            setRemoteVideoStreams(prev => { const n = { ...prev }; delete n[targetSocketId]; return n })
+            setRemoteScreenStreams(prev => { const n = { ...prev }; delete n[targetSocketId]; return n })
+          }
+        }, 5000)
       }
     }
     return pc
   }
 
   const playVoiceSound = (src, volume = 1) => {
-    const a = new Audio(src)
-    a.volume = Math.min(volume, 1)
-    a.addEventListener('canplaythrough', () => {
-      a.play().catch(e => console.error('Sound error:', src, e))
-    }, { once: true })
-    a.load()
+    // Map file paths to cache keys
+    const keyMap = { '/voice_connect.wav': 'voice_connect', '/voice_disconnect.wav': 'voice_disconnect', '/unmute.wav': 'unmute', '/mute_toggle.m4a': 'mute_toggle', '/sound_send.wav': 'sound_send' }
+    const key = keyMap[src]
+    if (key) {
+      playCachedSound(key, Math.min((soundVolume || 100) / 100 * volume, 1))
+    } else {
+      const a = new Audio(src)
+      a.volume = Math.min(volume, 1)
+      a.play().catch(() => {})
+    }
   }
 
   const joinVoiceChannel = async (channel) => {
@@ -1087,7 +1337,7 @@ export default function Chat() {
     setScreenShareOn(false)
     loadDevices()
     socket.emit('voice-join', { channelId: channel.id })
-    playVoiceSound('/voice_connect.wav', 0.8)
+    playVoiceSound('/voice_connect.wav', 1.5)
   }
 
   const leaveVoiceChannel = () => {
@@ -1118,19 +1368,29 @@ export default function Chat() {
     setCameraOn(false)
     setScreenShareOn(false)
     setRemoteVideoStreams({})
+    setRemoteScreenStreams({})
     setFocusedStreamUser(null)
     setPinnedUser(null)
     setShowMicPopup(false)
     setShowCameraPopup(false)
     setVoiceChannel(null)
     setVoiceViewChannel(null)
-    playVoiceSound('/voice_disconnect.wav', 0.8)
+    // Restore to first text channel or friends
+    const textCh = channels.filter(c => c.type !== 'voice')
+    if (textCh.length > 0) {
+      setActiveChannel(textCh[0])
+      setShowFriends(false)
+    } else {
+      setActiveChannel(null)
+      setShowFriends(true)
+    }
+    playVoiceSound('/voice_disconnect.wav', 1.5)
   }
 
   const toggleVoiceMute = async () => {
     const newMuted = !voiceMuted
     if (!localStream.current) {
-      if (newMuted) { setVoiceMuted(true); playVoiceSound('/mute_toggle.m4a', 1); socketRef.current?.emit('voice-mute-state', { muted: true, deafened: voiceDeafened }); return }
+      if (newMuted) { setVoiceMuted(true); playVoiceSound('/mute_toggle.m4a', 1.5); socketRef.current?.emit('voice-mute-state', { muted: true, deafened: voiceDeafened }); return }
       // Try to get mic if we didn't have it before
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: selectedMicId ? { deviceId: { exact: selectedMicId } } : true })
@@ -1141,7 +1401,7 @@ export default function Chat() {
           stream.getAudioTracks().forEach(track => pc.addTrack(track, stream))
         }
         setVoiceMuted(false)
-        playVoiceSound('/unmute.wav', 0.8)
+        playVoiceSound('/unmute.wav', 1.5)
         return
       } catch { setVoiceMuted(!voiceMuted); return }
     }
@@ -1150,7 +1410,7 @@ export default function Chat() {
       audioTrack.enabled = !newMuted
     }
     setVoiceMuted(newMuted)
-    playVoiceSound(newMuted ? '/mute_toggle.m4a' : '/unmute.wav', 0.8)
+    playVoiceSound(newMuted ? '/mute_toggle.m4a' : '/unmute.wav', 1.5)
     socketRef.current?.emit('voice-mute-state', { muted: newMuted, deafened: voiceDeafened })
   }
 
@@ -1159,7 +1419,7 @@ export default function Chat() {
     const newDeafened = !voiceDeafened
     audios.forEach(a => { a.muted = newDeafened })
     setVoiceDeafened(newDeafened)
-    playVoiceSound(newDeafened ? '/mute_toggle.m4a' : '/unmute.wav', 0.8)
+    playVoiceSound(newDeafened ? '/mute_toggle.m4a' : '/unmute.wav', 1.5)
     if (newDeafened) {
       // Deafen also mutes mic
       if (localStream.current) {
@@ -1274,17 +1534,19 @@ export default function Chat() {
   const renegotiateAll = async () => {
     for (const [sid, pc] of Object.entries(peerConnections.current)) {
       try {
+        pc._makingOffer = true
         const offer = await pc.createOffer()
+        if (pc.signalingState !== 'stable' && pc.signalingState !== 'have-local-offer') { pc._makingOffer = false; continue }
         await pc.setLocalDescription(offer)
-        socket.emit('voice-offer', { targetSocketId: sid, offer })
+        socket.emit('voice-offer', { targetSocketId: sid, offer: pc.localDescription })
       } catch (e) { console.warn('Renegotiation failed for', sid, e) }
+      finally { pc._makingOffer = false }
     }
   }
 
   // Toggle camera
   const toggleCamera = async () => {
     if (cameraOn) {
-      // Remove camera tracks from all peer connections
       if (cameraStream.current) {
         const videoTrack = cameraStream.current.getVideoTracks()[0]
         for (const pc of Object.values(peerConnections.current)) {
@@ -1302,7 +1564,6 @@ export default function Chat() {
         const stream = await navigator.mediaDevices.getUserMedia({ video: selectedCameraId ? { deviceId: { exact: selectedCameraId } } : true })
         cameraStream.current = stream
         setCameraOn(true)
-        // Add camera track to all peer connections
         const videoTrack = stream.getVideoTracks()[0]
         for (const pc of Object.values(peerConnections.current)) {
           pc.addTrack(videoTrack, stream)
@@ -1335,7 +1596,6 @@ export default function Chat() {
   // Toggle screen share
   const toggleScreenShare = async () => {
     if (screenShareOn) {
-      // Remove screen tracks from all peer connections
       if (screenStream.current) {
         const videoTrack = screenStream.current.getVideoTracks()[0]
         for (const pc of Object.values(peerConnections.current)) {
@@ -1350,18 +1610,29 @@ export default function Chat() {
       await renegotiateAll()
     } else {
       try {
-        const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false })
+        const stream = await navigator.mediaDevices.getDisplayMedia({ video: { cursor: 'always', width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30, max: 60 } }, audio: false })
         screenStream.current = stream
         setScreenShareOn(true)
-        // Add screen track to all peer connections
         const videoTrack = stream.getVideoTracks()[0]
+        // Hint browser to optimize for screen content (sharp text, less compression)
+        if (videoTrack.contentHint !== undefined) videoTrack.contentHint = 'detail'
         for (const pc of Object.values(peerConnections.current)) {
-          pc.addTrack(videoTrack, stream)
+          const sender = pc.addTrack(videoTrack, stream)
+          // Set high bitrate for screen share quality
+          if (sender) {
+            try {
+              const params = sender.getParameters()
+              if (!params.encodings) params.encodings = [{}]
+              params.encodings[0].maxBitrate = 5000000 // 5 Mbps for sharp screen share
+              params.encodings[0].maxFramerate = 30
+              params.encodings[0].scaleResolutionDownBy = 1.0 // No downscaling
+              await sender.setParameters(params)
+            } catch {}
+          }
         }
         socket.emit('voice-video-state', { camera: cameraOn, screen: true })
         await renegotiateAll()
-        stream.getVideoTracks()[0].onended = () => {
-          // Remove screen tracks from PCs
+        videoTrack.onended = () => {
           for (const pc of Object.values(peerConnections.current)) {
             const sender = pc.getSenders().find(s => s.track === videoTrack)
             if (sender) pc.removeTrack(sender)
@@ -1384,6 +1655,26 @@ export default function Chat() {
     document.addEventListener('mousedown', handler)
     return () => document.removeEventListener('mousedown', handler)
   }, [showMicPopup, showCameraPopup])
+
+  // PWA keyboard handling — shift layout up when virtual keyboard opens
+  useEffect(() => {
+    if (!window.visualViewport) return
+    const onResize = () => {
+      const vv = window.visualViewport
+      const offset = window.innerHeight - vv.height
+      document.documentElement.style.setProperty('--keyboard-offset', offset + 'px')
+      // Scroll chat to bottom when keyboard opens
+      if (offset > 100 && messagesAreaRef.current) {
+        setTimeout(() => messagesAreaRef.current?.scrollTo({ top: messagesAreaRef.current.scrollHeight }), 50)
+      }
+    }
+    window.visualViewport.addEventListener('resize', onResize)
+    window.visualViewport.addEventListener('scroll', onResize)
+    return () => {
+      window.visualViewport.removeEventListener('resize', onResize)
+      window.visualViewport.removeEventListener('scroll', onResize)
+    }
+  }, [])
 
   // Load servers
   useEffect(() => {
@@ -1740,6 +2031,7 @@ export default function Chat() {
       setActiveDM(dm)
       setFriendsTab('all')
       loadDmChannels()
+      if (isMobile) setMobileInChat(true)
     } catch {}
   }
 
@@ -1856,6 +2148,7 @@ export default function Chat() {
     setActiveServer(null)
     setActiveChannel(null)
     setActiveDM(null)
+    setMobileInChat(false)
     loadFriends()
     loadDmChannels()
   }
@@ -2024,7 +2317,11 @@ export default function Chat() {
     if (!activeServer) return false
     if (activeServer.ownerId === user.id) return true
     const myMember = members.find(m => m.id === user.id)
-    if (myMember?.role === 'admin' && activeServer.adminPermissions?.[perm]) return true
+    if (!myMember) return false
+    if (myMember.role === 'admin' && activeServer.adminPermissions?.[perm]) return true
+    // Check custom role permissions
+    const customRole = (activeServer.customRoles || []).find(r => r.id === myMember.role)
+    if (customRole && customRole.permissions?.[perm]) return true
     return false
   }, [activeServer, members, user.id])
 
@@ -2088,12 +2385,29 @@ export default function Chat() {
     setChannelMenu(null)
     setConfirmDialog({
       title: t('channel.delete'),
-      message: `${t('channel.deleteConfirm')} #${channel.name}`,
+      message: `${t('channel.deleteConfirm')} ${channel.type === 'voice' ? '🔊' : '#'}${channel.name}`,
       confirmText: t('common.delete'),
       danger: true,
       onConfirm: async () => {
         try {
           await API(`/api/channels/${channel.id}`, { method: 'DELETE' })
+        } catch (e) { console.error(e) }
+        setConfirmDialog(null)
+      }
+    })
+  }
+
+  const clearChannelMessages = (channel) => {
+    setChannelMenu(null)
+    setConfirmDialog({
+      title: t('channel.clear') || 'Очистить канал',
+      message: (t('channel.clearConfirm') || 'Очистить все сообщения в канале #{name}?').replace('{name}', channel.name),
+      confirmText: t('channel.clear') || 'Очистить',
+      danger: true,
+      onConfirm: async () => {
+        try {
+          await API(`/api/channels/${channel.id}/clear`, { method: 'POST' })
+          if (activeChannel?.id === channel.id) setMessages([])
         } catch (e) { console.error(e) }
         setConfirmDialog(null)
       }
@@ -2131,6 +2445,91 @@ export default function Chat() {
 
   const cancelEdit = () => setEditingMsg(null)
 
+  // Emoji data
+  const emojiData = useMemo(() => ({
+    smileys: { icon: '😀', label: 'Смайлы', emojis: ['😀','😃','😄','😁','😆','😅','🤣','😂','🙂','😊','😇','🥰','😍','🤩','😘','😗','😚','😋','😛','😜','🤪','😝','🤗','🤭','🤫','🤔','🫡','🤐','🤨','😐','😑','😶','🫥','😏','😒','🙄','😬','😮‍💨','🤥','🫨','😌','😔','😪','🤤','😴','😷','🤒','🤕','🤢','🤮','🥵','🥶','🥴','😵','🤯','🤠','🥳','🥸','😎','🤓','🧐','😕','🫤','😟','🙁','☹️','😮','😯','😲','😳','🥺','🥹','😦','😧','😨','😰','😥','😢','😭','😱','😖','😣','😞','😓','😩','😫','🥱','😤','😡','😠','🤬','😈','👿','💀','☠️','💩','🤡','👹','👺','👻','👽','👾','🤖'] },
+    gestures: { icon: '👋', label: 'Жесты', emojis: ['👋','🤚','🖐️','✋','🖖','🫱','🫲','🫳','🫴','👌','🤌','🤏','✌️','🤞','🫰','🤟','🤘','🤙','👈','👉','👆','🖕','👇','☝️','🫵','👍','👎','✊','👊','🤛','🤜','👏','🙌','🫶','👐','🤲','🤝','🙏','✍️','💅','🤳','💪','🦾','🦿','🦵','🦶','👂','🦻','👃','🧠','🫀','🫁','🦷','🦴','👀','👁️','👅','👄'] },
+    hearts: { icon: '❤️', label: 'Сердца', emojis: ['❤️','🧡','💛','💚','💙','💜','🖤','🤍','🤎','💔','❤️‍🔥','❤️‍🩹','❣️','💕','💞','💓','💗','💖','💘','💝','💟'] },
+    animals: { icon: '🐶', label: 'Животные', emojis: ['🐶','🐱','🐭','🐹','🐰','🦊','🐻','🐼','🐻‍❄️','🐨','🐯','🦁','🐮','🐷','🐸','🐵','🙈','🙉','🙊','🐒','🐔','🐧','🐦','🐤','🐣','🐥','🦆','🦅','🦉','🦇','🐺','🐗','🐴','🦄','🐝','🪱','🐛','🦋','🐌','🐞','🐜','🪰','🪲','🪳','🦟','🦗','🕷️','🦂','🐢','🐍','🦎','🦖','🦕','🐙','🦑','🦐','🦞','🦀','🪼','🐡','🐠','🐟','🐬','🐳','🐋','🦈','🐊','🐅','🐆','🦓','🦍','🦧','🐘','🦛','🦏','🐪','🐫','🦒','🦘','🦬','🐃','🐂','🐄','🐎','🐖','🐏','🐑','🦙','🐐','🦌','🐕','🐩','🦮','🐕‍🦺','🐈','🐈‍⬛','🪶','🐓','🦃','🦤','🦚','🦜','🦢','🦩','🕊️','🐇','🦝','🦨','🦡','🦫','🦦','🦥','🐁','🐀','🐿️','🦔'] },
+    food: { icon: '🍕', label: 'Еда', emojis: ['🍏','🍎','🍐','🍊','🍋','🍌','🍉','🍇','🍓','🫐','🍈','🍒','🍑','🥭','🍍','🥥','🥝','🍅','🍆','🥑','🥦','🥬','🥒','🌶️','🫑','🌽','🥕','🫒','🧄','🧅','🥔','🍠','🫘','🥐','🥯','🍞','🥖','🥨','🧀','🥚','🍳','🧈','🥞','🧇','🥓','🥩','🍗','🍖','🦴','🌭','🍔','🍟','🍕','🫓','🥪','🥙','🧆','🌮','🌯','🫔','🥗','🥘','🫕','🥫','🍝','🍜','🍲','🍛','🍣','🍱','🥟','🦪','🍤','🍙','🍚','🍘','🍥','🥠','🥮','🍢','🍡','🍧','🍨','🍦','🥧','🧁','🍰','🎂','🍮','🍭','🍬','🍫','🍿','🍩','🍪','🌰','🥜','🍯','🥛','🍼','🫖','☕','🍵','🧃','🥤','🧋','🫙','🍶','🍺','🍻','🥂','🍷','🫗','🥃','🍸','🍹','🧉','🍾','🧊','🥄','🍴','🍽️','🥣','🥡','🥢','🧂'] },
+    travel: { icon: '🚗', label: 'Транспорт', emojis: ['🚗','🚕','🚙','🚌','🚎','🏎️','🚓','🚑','🚒','🚐','🛻','🚚','🚛','🚜','🏍️','🛵','🚲','🛴','🛹','🛼','🚁','🛸','🚀','🛩️','✈️','🛫','🛬','🪂','💺','🚂','🚃','🚄','🚅','🚆','🚇','🚈','🚉','🚊','🚝','🚞','🚋','🚟','🚠','🚡','🛥️','🚢','⛵','🛶','🚤','⚓','🗼','🗽','🗿','🏰','🏯','🏟️','🎡','🎢','🎠','⛲','⛱️','🏖️','🏝️','🏜️','🌋','⛰️','🏔️','🗻','🏕️','🛖','🏠','🏡','🏘️','🏚️'] },
+    objects: { icon: '💡', label: 'Объекты', emojis: ['⌚','📱','📲','💻','⌨️','🖥️','🖨️','🖱️','🖲️','🕹️','🗜️','💽','💾','💿','📀','📼','📷','📸','📹','🎥','📽️','🎞️','📞','☎️','📟','📠','📺','📻','🎙️','🎚️','🎛️','🧭','⏱️','⏲️','⏰','🕰️','⌛','⏳','📡','🔋','🪫','🔌','💡','🔦','🕯️','🧯','🛢️','💸','💵','💴','💶','💷','🪙','💰','💳','💎','⚖️','🪜','🧰','🪛','🔧','🔨','⚒️','🛠️','⛏️','🪚','🔩','⚙️','🪤','🧲','🔫','💣','🧨','🪓','🔪','🗡️','⚔️','🛡️','🚬','⚰️','🪦','⚱️','🏺','🔮','📿','🧿','🪬','💈','⚗️','🔭','🔬','🕳️','🩹','🩺','🩻','🩼','💊','💉','🩸','🧬','🦠','🧫','🧪','🌡️','🧹','🪠','🧺','🧻','🚽','🚰','🚿','🛁','🛀','🧼','🪥','🪒','🧽','🪣','🧴','🛎️','🔑','🗝️','🚪','🪑','🛋️','🛏️','🛌','🧸','🪆','🖼️','🪞','🪟','🛍️','🛒','🎁','🎈','🎏','🎀','🪄','🪅','🎊','🎉','🎎','🏮','🎐','🧧','✉️','📩','📨','📧','💌','📥','📤','📦','🏷️','🪧','📪','📫','📬','📭','📮','📯','📜','📃','📄','📑','🧾','📊','📈','📉','🗒️','🗓️','📆','📅','🗑️','📇','🗃️','🗳️','🗄️','📋','📁','📂','🗂️','🗞️','📰','📓','📔','📒','📕','📗','📘','📙','📚','📖','🔖','🧷','🔗','📎','🖇️','📐','📏','🧮','📌','📍','✂️','🖊️','🖋️','✒️','🖌️','🖍️','📝','✏️','🔍','🔎','🔏','🔐','🔒','🔓'] },
+    symbols: { icon: '⭐', label: 'Символы', emojis: ['⭐','🌟','✨','💫','🔥','💥','⚡','🌈','☀️','🌤️','⛅','🌥️','☁️','🌦️','🌧️','⛈️','🌩️','❄️','☃️','⛄','🌊','💧','💦','☔','🎵','🎶','🎼','🎤','🎧','📣','📢','🔔','🔕','🎃','🎄','🎆','🎇','🧨','✨','🎈','🎉','🎊','🎋','🎍','🎎','🎏','🎐','🎑','🎀','🎁','🏆','🏅','🥇','🥈','🥉','⚽','⚾','🥎','🏀','🏐','🏈','🏉','🎾','🥏','🎳','🏏','🏑','🏒','🥍','🏓','🏸','🥊','🥋','🥅','⛳','⛸️','🎣','🤿','🎽','🎿','🛷','🥌','🎯','🪀','🪁','🔮','🧿','🎮','🕹️','🎰','🎲','🧩','🧸','♠️','♥️','♦️','♣️','♟️','🃏','🀄','🎴'] },
+    flags: { icon: '🏁', label: 'Флаги', emojis: ['🏁','🚩','🎌','🏴','🏳️','🏳️‍🌈','🏳️‍⚧️','🏴‍☠️','🇷🇺','🇺🇸','🇬🇧','🇩🇪','🇫🇷','🇪🇸','🇮🇹','🇯🇵','🇰🇷','🇨🇳','🇧🇷','🇮🇳','🇨🇦','🇦🇺','🇲🇽','🇹🇷','🇺🇦','🇵🇱','🇳🇱','🇸🇪','🇳🇴','🇫🇮','🇩🇰','🇦🇹','🇨🇭','🇧🇪','🇵🇹','🇬🇷','🇨🇿','🇷🇴','🇭🇺','🇮🇱','🇦🇪','🇸🇦','🇪🇬','🇿🇦','🇳🇬','🇰🇪','🇦🇷','🇨🇱','🇨🇴','🇵🇪','🇻🇪','🇹🇭','🇻🇳','🇮🇩','🇵🇭','🇲🇾','🇸🇬','🇳🇿','🇰🇿'] },
+  }), [])
+
+  const insertEmoji = (emoji) => {
+    setInput(prev => (prev + emoji).slice(0, 200))
+    setShowEmojiPicker(false)
+    setEmojiSearch('')
+  }
+
+  useEffect(() => {
+    if (!showEmojiPicker) return
+    const close = (e) => {
+      if (emojiPickerRef.current && !emojiPickerRef.current.contains(e.target)) {
+        setShowEmojiPicker(false)
+        setEmojiSearch('')
+      }
+    }
+    document.addEventListener('mousedown', close)
+    return () => document.removeEventListener('mousedown', close)
+  }, [showEmojiPicker])
+
+  // Reactions
+  const openReactionPicker = (e, msgId, isDM) => {
+    e.stopPropagation()
+    const r = e.currentTarget.getBoundingClientRect()
+    const spaceBelow = window.innerHeight - r.bottom
+    const pickerH = 380
+    const y = spaceBelow < pickerH + 8 ? r.top - pickerH - 4 : r.bottom + 4
+    const x = Math.min(r.left, window.innerWidth - 350)
+    setReactionPickerMsg(reactionPickerMsg?.id === msgId ? null : { id: msgId, isDM, x, y })
+    setReactionSearch('')
+    setReactionCategory('smileys')
+  }
+
+  const toggleReaction = async (msgId, emoji, isDM = false) => {
+    try {
+      const endpoint = isDM ? `/api/dm-messages/${msgId}/react` : `/api/messages/${msgId}/react`
+      await API(endpoint, { method: 'POST', body: JSON.stringify({ emoji }) })
+    } catch (e) { console.error('React error:', e) }
+    setReactionPickerMsg(null)
+    setReactionSearch('')
+  }
+
+  const showReactionUsers = (e, emoji, userIds, isDM) => {
+    e.preventDefault()
+    e.stopPropagation()
+    const resolvedUsers = userIds.map(uid => {
+      if (uid === user.id) return { id: uid, username: user.username, avatarColor: user.avatarColor }
+      if (isDM && activeDM?.partner?.id === uid) return { id: uid, username: activeDM.partner.username, avatarColor: activeDM.partner.avatarColor }
+      const m = members.find(mm => mm.id === uid)
+      if (m) return { id: uid, username: m.username, avatarColor: m.avatarColor }
+      return { id: uid, username: 'User', avatarColor: '#666' }
+    })
+    setReactionUsersPopup({ emoji, users: resolvedUsers, x: e.clientX, y: e.clientY })
+  }
+
+  useEffect(() => {
+    if (!reactionUsersPopup) return
+    const close = () => setReactionUsersPopup(null)
+    document.addEventListener('mousedown', close)
+    return () => document.removeEventListener('mousedown', close)
+  }, [reactionUsersPopup])
+
+  useEffect(() => {
+    if (!reactionPickerMsg) return
+    const close = (e) => {
+      if (reactionPickerRef.current && !reactionPickerRef.current.contains(e.target)) {
+        setReactionPickerMsg(null)
+        setReactionSearch('')
+      }
+    }
+    document.addEventListener('mousedown', close)
+    return () => document.removeEventListener('mousedown', close)
+  }, [reactionPickerMsg])
+
   const isWithin15Min = (createdAt) => Date.now() - new Date(createdAt).getTime() < 15 * 60 * 1000
 
   const deleteMsgForAll = (msg, isDM) => {
@@ -2165,6 +2564,82 @@ export default function Chat() {
       if (isDM) setDmMessages(prev => prev.filter(m => m.id !== msg.id))
       else setMessages(prev => prev.filter(m => m.id !== msg.id))
     } catch {}
+  }
+
+  const toggleMsgSelect = (msgId) => {
+    setSelectedMsgs(prev => {
+      const next = new Set(prev)
+      if (next.has(msgId)) next.delete(msgId)
+      else next.add(msgId)
+      return next
+    })
+  }
+
+  const canBulkDeleteForAll = () => {
+    const isDM = !!activeDM
+    const msgList = isDM ? dmMessages : messages
+    const selectedList = msgList.filter(m => selectedMsgs.has(m.id) && !m.deleted)
+    if (selectedList.length === 0) return false
+    if (isDM) {
+      // In DM: all selected must be own and within 15 min
+      return selectedList.every(m => m.userId === user.id && isWithin15Min(m.createdAt))
+    } else {
+      // In channel: all must be own OR user has deleteMessages perm
+      const canDeleteOthers = hasServerPerm('deleteMessages')
+      return selectedList.every(m => m.userId === user.id || canDeleteOthers)
+    }
+  }
+
+  const bulkDeleteExec = async (mode) => {
+    try {
+      const ids = [...selectedMsgs]
+      if (activeDM) {
+        await API(`/api/dm-channels/${activeDM.id}/messages/bulk`, {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ messageIds: ids, mode })
+        })
+        if (mode === 'forMe') {
+          setHiddenMessages(prev => {
+            const next = new Set(prev)
+            ids.forEach(id => next.add(id))
+            localStorage.setItem('hiddenMsgs_' + user.id, JSON.stringify([...next]))
+            return next
+          })
+          setDmMessages(prev => prev.filter(m => !ids.includes(m.id)))
+        }
+      } else if (activeChannel) {
+        await API(`/api/channels/${activeChannel.id}/messages/bulk`, {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ messageIds: ids, mode })
+        })
+        if (mode === 'forMe') {
+          setHiddenMessages(prev => {
+            const next = new Set(prev)
+            ids.forEach(id => next.add(id))
+            localStorage.setItem('hiddenMsgs_' + user.id, JSON.stringify([...next]))
+            return next
+          })
+          setMessages(prev => prev.filter(m => !ids.includes(m.id)))
+        }
+      }
+    } catch {}
+    setSelectedMsgs(new Set())
+    setSelectMode(false)
+    setConfirmDialog(null)
+  }
+
+  const bulkDeleteMsgs = (mode) => {
+    if (selectedMsgs.size === 0) return
+    const label = mode === 'forAll' ? (t('msg.deleteForAll') || 'Удалить для всех') : (t('msg.deleteForMe') || 'Удалить для себя')
+    setConfirmDialog({
+      title: label,
+      message: (t('msg.deleteSelectedConfirm') || 'Удалить {count} выбранных сообщений?').replace('{count}', selectedMsgs.size),
+      confirmText: label,
+      danger: true,
+      onConfirm: () => bulkDeleteExec(mode)
+    })
   }
 
   const scrollToPinned = (idx) => {
@@ -2394,7 +2869,9 @@ export default function Chat() {
   const offlineMembers = members.filter(m => !m.status || m.status === 'offline')
 
   return (
-    <div className="chat-app">
+    <div className={`chat-app ${mobileNav ? 'mobile-nav-open' : ''} ${mobileInChat ? 'mobile-in-chat' : ''}`}>
+      {/* Mobile overlay */}
+      {mobileNav && <div className="mobile-overlay" onClick={() => setMobileNav(false)} />}
       {/* Server sidebar */}
       <div className="server-bar">
         <div className="server-bar-inner">
@@ -2427,7 +2904,8 @@ export default function Chat() {
 
       {/* Server context menu */}
       {serverCtx && (
-        <div className="server-ctx-menu" ref={serverCtxRef} style={{ top: serverCtx.y, left: serverCtx.x }}>
+        <div className="ctx-overlay" onClick={() => setServerCtx(null)}>
+        <div className="server-ctx-menu" ref={serverCtxRef} style={{ top: serverCtx.y, left: serverCtx.x }} onClick={e => e.stopPropagation()}>
           <button className="ctx-item" onClick={() => { markServerRead(serverCtx.server.id); setServerCtx(null) }}>
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
             <span>{t('channel.markRead')}</span>
@@ -2458,11 +2936,13 @@ export default function Chat() {
             <span>{t('server.copyId')}</span>
           </button>
         </div>
+        </div>
       )}
 
       {/* DM context menu */}
       {dmCtx && (
-        <div className="dm-ctx-menu" ref={dmCtxRef} style={{ top: dmCtx.y, left: dmCtx.x }}>
+        <div className="ctx-overlay" onClick={() => { setDmCtx(null); setDmMuteSub(false) }}>
+        <div className="dm-ctx-menu" ref={dmCtxRef} style={{ top: dmCtx.y, left: dmCtx.x }} onClick={e => e.stopPropagation()}>
           <button className="ctx-item" onClick={() => { showUserProfile(dmCtx.dm.partner, dmCtx.x, dmCtx.y) }}>
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
             <span>{t('profile.title')}</span>
@@ -2518,6 +2998,7 @@ export default function Chat() {
               <span>{t('dm.block')}</span>
             </button>
           )}
+        </div>
         </div>
       )}
 
@@ -2632,7 +3113,7 @@ export default function Chat() {
               )}
             </div>
             <div className="channel-list dm-nav">
-              <button className={`dm-nav-item ${!activeDM ? 'active' : ''}`} onClick={() => setActiveDM(null)}>
+              <button className={`dm-nav-item ${!activeDM && !mobileInChat ? 'active' : ''}`} onClick={() => { setActiveDM(null); if (isMobile) setMobileInChat(true) }}>
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/></svg>
                 <span>{t('nav.friends')}</span>
                 {(friendRequests.length + outgoingRequests.length) > 0 && <span className="nav-badge pending">{friendRequests.length + outgoingRequests.length}</span>}
@@ -2656,7 +3137,7 @@ export default function Chat() {
                     const goToMessage = (msgId) => {
                       const dm = dmChannels.find(d => d.id === r.dmId)
                       if (dm) {
-                        setActiveDM(dm)
+                        setActiveDM(dm); if (isMobile) setMobileInChat(true)
                         setDmSearchQuery('')
                         setDmSearchResults(null)
                         setDmSearchExpanded(null)
@@ -2684,7 +3165,7 @@ export default function Chat() {
                               setDmSearchExpanded(isExpanded ? null : r.dmId)
                             } else {
                               const dm = dmChannels.find(d => d.id === r.dmId)
-                              if (dm) { setActiveDM(dm); setDmSearchQuery(''); setDmSearchResults(null) }
+                              if (dm) { setActiveDM(dm); setDmSearchQuery(''); setDmSearchResults(null); if (isMobile) setMobileInChat(true) }
                             }
                           }}
                         >
@@ -2735,7 +3216,7 @@ export default function Chat() {
                 <button
                   key={dm.id}
                   className={`dm-item ${activeDM?.id === dm.id ? 'active' : ''} ${dmUnread > 0 ? 'has-unread' : ''}`}
-                  onClick={() => setActiveDM(dm)}
+                  onClick={() => { setActiveDM(dm); setSelectMode(false); setSelectedMsgs(new Set()); setMobileNav(false); if (isMobile) setMobileInChat(true) }}
                   onContextMenu={(e) => handleDmContext(e, dm)}
                 >
                   <div className="dm-item-avatar" style={{ background: dm.partner?.avatarColor }}>
@@ -2831,7 +3312,7 @@ export default function Chat() {
                 <button
                   key={c.id}
                   className={`channel-item ${activeChannel?.id === c.id && !voiceViewChannel ? 'active' : ''} ${chUnread > 0 ? 'has-unread' : ''}`}
-                  onClick={() => { setActiveChannel(c); setVoiceViewChannel(null) }}
+                  onClick={() => { setActiveChannel(c); setVoiceViewChannel(null); setSelectMode(false); setSelectedMsgs(new Set()); setMobileNav(false); if (isMobile) setMobileInChat(true) }}
                 >
                   {mutedChannels[c.id] && mutedChannels[c.id] > Date.now() ? (
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" opacity=".5" title={(() => { if (mutedChannels[c.id] >= 9999999999999) return t('mute.forever'); const left = mutedChannels[c.id] - Date.now(); if (left > 86400000) return t('mute.days').replace('{n}', Math.ceil(left / 86400000)); if (left > 3600000) return t('mute.hours').replace('{n}', Math.ceil(left / 3600000)); return t('mute.minutes').replace('{n}', Math.ceil(left / 60000)) })()}><path d="M11 5L6 9H2v6h4l5 4V5z"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>
@@ -2867,11 +3348,14 @@ export default function Chat() {
                   <div key={vc.id} className="voice-channel-wrap">
                     <button
                       className={`channel-item voice-channel-item ${isConnected && voiceViewChannel?.id === vc.id ? 'active' : ''} ${isConnected ? 'connected' : ''}`}
-                      onClick={() => { if (isConnected) { setVoiceViewChannel(vc); setActiveChannel(null) } else { joinVoiceChannel(vc) } }}
+                      onClick={() => { if (isConnected) { setVoiceViewChannel(vc); setActiveChannel(null) } else { joinVoiceChannel(vc) }; setMobileNav(false); if (isMobile) setMobileInChat(true) }}
                     >
                       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/><path d="M19 10v2a7 7 0 01-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
                       <span>{vc.name}</span>
                       {vcUsers.length > 0 && <span className="voice-user-count">{vcUsers.length}</span>}
+                      <span className="channel-gear" onClick={(e) => handleChannelGear(e, vc)} title={t('channel.settings')}>
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 15a3 3 0 100-6 3 3 0 000 6z"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+                      </span>
                     </button>
                     {vcUsers.length > 0 && (
                       <div className="voice-users-list">
@@ -3020,6 +3504,8 @@ export default function Chat() {
           <>
             <div className="chat-header">
               <div className="chat-header-left">
+                <button className="mobile-back-btn" onClick={() => { setMobileInChat(false); setActiveDM(null) }}><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 18 9 12 15 6"/></svg></button>
+                <button className="mobile-hamburger" onClick={() => setMobileNav(true)}><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg></button>
                 <div className="dm-header-avatar" style={{ background: activeDM.partner?.avatarColor }}>
                   {activeDM.partner?.username?.[0]?.toUpperCase()}
                 </div>
@@ -3052,9 +3538,23 @@ export default function Chat() {
                   const isGrouped = prev && prev.userId === msg.userId && !msg.type && !prev?.type && (new Date(msg.createdAt) - new Date(prev.createdAt)) < 300000
                   if (hiddenMessages.has(msg.id)) return null
                   return (
-                    <div key={msg.id} id={'msg-' + msg.id} className={`message ${isGrouped ? 'grouped' : ''}${isMsgPinned(msg, true) ? ' pinned' : ''}${msg.deleted ? ' deleted-msg' : ''}`} onContextMenu={(e) => !msg.deleted && handleMsgContext(e, msg, true)}>
+                    <div key={msg.id} id={'msg-' + msg.id} className={`message ${isGrouped ? 'grouped' : ''}${isMsgPinned(msg, true) ? ' pinned' : ''}${msg.deleted ? ' deleted-msg' : ''}${selectMode && selectedMsgs.has(msg.id) ? ' selected' : ''}`} onContextMenu={(e) => !msg.deleted && handleMsgContext(e, msg, true)} onClick={() => selectMode && !msg.deleted && toggleMsgSelect(msg.id)} onMouseEnter={() => !selectMode && !msg.deleted && setHoveredMsg(msg.id)} onMouseLeave={() => hoveredMsg === msg.id && setHoveredMsg(null)} onDoubleClick={() => !selectMode && !msg.deleted && toggleReaction(msg.id, '👍', true)}>
+                      {hoveredMsg === msg.id && !selectMode && !msg.deleted && (
+                        <div className="msg-hover-actions">
+                          <button title={t('message.replyAction')} onClick={(e) => { e.stopPropagation(); setReplyTo(msg) }}><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 00-4-4H4"/></svg></button>
+                          <button title="👍" onClick={(e) => { e.stopPropagation(); toggleReaction(msg.id, '👍', true) }}>👍</button>
+                          <button title={t('emoji.search')} onClick={(e) => { openReactionPicker(e, msg.id, true) }}><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/></svg></button>
+                        </div>
+                      )}
+                      {selectMode && !msg.deleted && (
+                        <div className="msg-select-checkbox" onClick={(e) => { e.stopPropagation(); toggleMsgSelect(msg.id) }}>
+                          <div className={`msg-checkbox ${selectedMsgs.has(msg.id) ? 'checked' : ''}`}>
+                            {selectedMsgs.has(msg.id) && <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="3" strokeLinecap="round"><polyline points="20 6 9 17 4 12"/></svg>}
+                          </div>
+                        </div>
+                      )}
                       {isMsgPinned(msg, true) && !msg.deleted && <div className="msg-pin-indicator"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z"/></svg></div>}
-                      {!isGrouped && (
+                      {!isGrouped && !selectMode && (
                         <div className="msg-avatar clickable" style={{ background: msg.user?.avatarColor }} onClick={(e) => msg.user && showUserProfile(msg.user, e.clientX, e.clientY)}>
                           {msg.user?.username?.[0]?.toUpperCase()}
                         </div>
@@ -3149,6 +3649,19 @@ export default function Chat() {
                             )}
                           </div>
                         )}
+                        {msg.reactions?.length > 0 && (
+                          <div className="msg-reactions">
+                            {msg.reactions.map((r, ri) => (
+                              <button key={ri} className={`msg-reaction ${r.users.includes(user.id) ? 'reacted' : ''}`} onClick={(e) => { e.stopPropagation(); toggleReaction(msg.id, r.emoji, true) }} onContextMenu={(e) => showReactionUsers(e, r.emoji, r.users, true)}>
+                                <span className="reaction-emoji">{r.emoji}</span>
+                                <span className="reaction-count">{r.users.length}</span>
+                              </button>
+                            ))}
+                            <button className="msg-reaction add-reaction" onClick={(e) => { openReactionPicker(e, msg.id, true) }}>
+                              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg>
+                            </button>
+                          </div>
+                        )}
                       </div>
                     </div>
                   )
@@ -3162,13 +3675,31 @@ export default function Chat() {
                 </button>
               )}
             </div>
+            {selectMode && (
+              <div className="select-bar">
+                <span className="select-bar-count">{(t('msg.selectedCount') || 'Выбрано: {count}').replace('{count}', selectedMsgs.size)}</span>
+                {canBulkDeleteForAll() && (
+                  <button className="select-bar-delete" onClick={() => bulkDeleteMsgs('forAll')} disabled={selectedMsgs.size === 0}>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
+                    <span>{t('msg.deleteForAll') || 'Удалить для всех'}</span>
+                  </button>
+                )}
+                <button className="select-bar-delete" onClick={() => bulkDeleteMsgs('forMe')} disabled={selectedMsgs.size === 0} style={{ background: 'var(--bg-secondary)' }}>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
+                  <span>{t('msg.deleteForMe') || 'Удалить для себя'}</span>
+                </button>
+                <button className="select-bar-cancel" onClick={() => { setSelectMode(false); setSelectedMsgs(new Set()) }}>
+                  <span>{t('common.cancel') || 'Отмена'}</span>
+                </button>
+              </div>
+            )}
             {blockedByPartner || blockedUsers.includes(activeDM.partner?.id) ? (
-              <div className="chat-input-blocked">
+              <div className="chat-input-blocked" style={selectMode ? { display: 'none' } : undefined}>
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="10"/><path d="M4.93 4.93l14.14 14.14"/></svg>
                 <span>{blockedUsers.includes(activeDM.partner?.id) ? t('msg.blockedUser') : t('msg.cannotSend')}</span>
               </div>
             ) : (
-              <form className="chat-input-form" onSubmit={sendDM}>
+              <form className="chat-input-form" onSubmit={sendDM} style={selectMode ? { display: 'none' } : undefined}>
                 {replyTo && replyTo.isDM && (
                   <div className="reply-bar">
                     <div className="reply-bar-line" style={{ background: replyTo.user?.avatarColor || 'var(--primary)' }} />
@@ -3213,6 +3744,31 @@ export default function Chat() {
                     autoFocus
                   />
                   {input.length > 150 && <span className="char-counter" style={{ color: input.length >= 200 ? 'var(--danger)' : 'var(--text-muted)' }}>{input.length}/200</span>}
+                  <div className="emoji-btn-wrapper">
+                    <button type="button" className="input-btn emoji-toggle-btn" onClick={() => { setShowEmojiPicker(v => !v); setEmojiSearch(''); setEmojiCategory('smileys') }} title={t('emoji.title') || 'Эмодзи'}>
+                      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/></svg>
+                    </button>
+                    {showEmojiPicker && (
+                      <div className="emoji-picker" ref={emojiPickerRef}>
+                        <div className="emoji-picker-search">
+                          <input type="text" placeholder={t('emoji.search') || 'Поиск...'} value={emojiSearch} onChange={e => setEmojiSearch(e.target.value)} autoFocus />
+                        </div>
+                        <div className="emoji-picker-cats">
+                          {Object.entries(emojiData).map(([key, cat]) => (
+                            <button key={key} className={`emoji-cat-btn ${emojiCategory === key ? 'active' : ''}`} onClick={() => setEmojiCategory(key)} title={cat.label}>{cat.icon}</button>
+                          ))}
+                        </div>
+                        <div className="emoji-picker-grid">
+                          {(emojiSearch
+                            ? Object.values(emojiData).flatMap(c => c.emojis)
+                            : emojiData[emojiCategory]?.emojis || []
+                          ).filter(e => !emojiSearch || e.includes(emojiSearch)).map((emoji, i) => (
+                            <button key={i} className="emoji-item" onClick={() => insertEmoji(emoji)}>{emoji}</button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
                   <button type="submit" className="input-btn send-btn" disabled={!input.trim()}>
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg>
                   </button>
@@ -3224,6 +3780,8 @@ export default function Chat() {
           <div className="friends-panel">
             <div className="chat-header">
               <div className="chat-header-left">
+                <button className="mobile-back-btn" onClick={() => { setMobileInChat(false) }}><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 18 9 12 15 6"/></svg></button>
+                <button className="mobile-hamburger" onClick={() => setMobileNav(true)}><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg></button>
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" strokeWidth="2"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/></svg>
                 <h3>{t('friends.title')}</h3>
                 <div className="friends-header-divider" />
@@ -3237,6 +3795,16 @@ export default function Chat() {
                   <button className={`friends-tab friends-tab-add ${friendsTab === 'add' ? 'active' : ''}`} onClick={() => setFriendsTab('add')}>{t('friends.add')}</button>
                 </div>
               </div>
+            </div>
+            {/* Mobile-only friends tabs row */}
+            <div className="mobile-friends-tabs">
+              <button className={`friends-tab ${friendsTab === 'all' ? 'active' : ''}`} onClick={() => setFriendsTab('all')}>{t('friends.all')}</button>
+              <button className={`friends-tab ${friendsTab === 'pending' ? 'active' : ''}`} onClick={() => setFriendsTab('pending')}>
+                {t('friends.pending')}
+                {friendRequests.length > 0 && <span className="friends-tab-badge">{friendRequests.length}</span>}
+              </button>
+              <button className={`friends-tab ${friendsTab === 'blocked' ? 'active' : ''}`} onClick={() => setFriendsTab('blocked')}>{t('friends.blocked')}</button>
+              <button className={`friends-tab friends-tab-add ${friendsTab === 'add' ? 'active' : ''}`} onClick={() => setFriendsTab('add')}>{t('friends.add')}</button>
             </div>
             {friendsTab === 'all' && (
               <div className="friends-search-bar">
@@ -3502,6 +4070,8 @@ export default function Chat() {
           <>
             <div className="chat-header">
               <div className="chat-header-left">
+                <button className="mobile-back-btn" onClick={() => { setMobileInChat(false) }}><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 18 9 12 15 6"/></svg></button>
+                <button className="mobile-hamburger" onClick={() => setMobileNav(true)}><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg></button>
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" strokeWidth="2"><path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/><path d="M19 10v2a7 7 0 01-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
                 <h3>{voiceViewChannel.name}</h3>
               </div>
@@ -3546,7 +4116,7 @@ export default function Chat() {
                       {showScreen ? (
                         <video
                           key={focusedStreamUser + '-screen'}
-                          ref={el => { if (el) el.srcObject = focusedIsLocal ? screenStream.current : remoteVideoStreams[focusedUser.socketId] }}
+                          ref={el => { if (el) el.srcObject = focusedIsLocal ? screenStream.current : (remoteScreenStreams[focusedUser.socketId] || remoteVideoStreams[focusedUser.socketId]) }}
                           autoPlay muted={focusedIsLocal} playsInline
                           className="voice-focused-video"
                         />
@@ -3560,7 +4130,7 @@ export default function Chat() {
                       ) : focusedIsScreenSharing ? (
                         <video
                           key={focusedStreamUser + '-screen-fallback'}
-                          ref={el => { if (el) el.srcObject = focusedIsLocal ? screenStream.current : remoteVideoStreams[focusedUser.socketId] }}
+                          ref={el => { if (el) el.srcObject = focusedIsLocal ? screenStream.current : (remoteScreenStreams[focusedUser.socketId] || remoteVideoStreams[focusedUser.socketId]) }}
                           autoPlay muted={focusedIsLocal} playsInline
                           className="voice-focused-video"
                         />
@@ -3610,17 +4180,22 @@ export default function Chat() {
                             {(() => {
                               const vuIsLocal = vu.id === user.id
                               const vuHasScreen = vuIsLocal ? screenShareOn : vu.screen
-                              const vuHasCamera = vuIsLocal ? (cameraOn && cameraStream.current) : false
+                              const vuHasCamera = vuIsLocal ? (cameraOn && cameraStream.current) : (vu.camera && remoteVideoStreams[vu.socketId])
                               const vuHasBoth = vuHasScreen && vuHasCamera
                               // If this user is focused and has both, mini shows the OTHER stream
                               if (isFocused && vuHasBoth) {
                                 if (focusedStreamType === 'screen') {
                                   // Main shows screen, mini shows camera
-                                  return <video ref={el => { if (el && cameraStream.current) el.srcObject = cameraStream.current }} autoPlay muted playsInline className="voice-tile-video mirror" />
+                                  if (vuIsLocal) return <video ref={el => { if (el && cameraStream.current) el.srcObject = cameraStream.current }} autoPlay muted playsInline className="voice-tile-video mirror" />
+                                  return remoteVideoStreams[vu.socketId]
+                                    ? <video ref={el => { if (el) el.srcObject = remoteVideoStreams[vu.socketId] }} autoPlay playsInline className="voice-tile-video" />
+                                    : <div className="voice-tile-avatar" style={{ background: vu.avatarColor }}>{vu.username[0].toUpperCase()}</div>
                                 } else {
                                   // Main shows camera, mini shows screen
-                                  return vuIsLocal && screenStream.current
-                                    ? <video ref={el => { if (el && screenStream.current) el.srcObject = screenStream.current }} autoPlay muted playsInline className="voice-tile-video" />
+                                  if (vuIsLocal && screenStream.current) return <video ref={el => { if (el && screenStream.current) el.srcObject = screenStream.current }} autoPlay muted playsInline className="voice-tile-video" />
+                                  const scrSrc = remoteScreenStreams[vu.socketId] || remoteVideoStreams[vu.socketId]
+                                  return scrSrc
+                                    ? <video ref={el => { if (el) el.srcObject = scrSrc }} autoPlay playsInline className="voice-tile-video" />
                                     : <div className="voice-tile-avatar" style={{ background: vu.avatarColor }}>{vu.username[0].toUpperCase()}</div>
                                 }
                               }
@@ -3667,11 +4242,18 @@ export default function Chat() {
                       const hasLocalScreen = isLocal && screenShareOn && screenStream.current
                       const isScreenSharing = isLocal ? screenShareOn : vu.screen
                       const hasRemoteVideo = !isLocal && remoteVideoStreams[vu.socketId]
+                      const hasRemoteScreen = !isLocal && (remoteScreenStreams[vu.socketId] || (isScreenSharing && remoteVideoStreams[vu.socketId]))
+                      const remoteScreenSrc = remoteScreenStreams[vu.socketId] || (isScreenSharing ? remoteVideoStreams[vu.socketId] : null)
                       const hasVideo = hasLocalCamera || hasRemoteVideo
                       return (
-                        <div key={vu.id} className={`voice-tile ${speakingUsers.has(vu.id) ? 'speaking' : ''} ${hasVideo || hasLocalScreen ? 'has-video' : ''}`}>
-                          {isScreenSharing && !hasVideo ? (
-                            /* Screen share tile — show "Watch" button */
+                        <div key={vu.id} className={`voice-tile ${speakingUsers.has(vu.id) ? 'speaking' : ''} ${hasVideo || hasLocalScreen || hasRemoteScreen ? 'has-video' : ''}`}>
+                          {isScreenSharing && !isLocal && hasRemoteScreen ? (
+                            /* Remote screen share tile — show actual screen stream, click to enter focused view */
+                            <div style={{ position: 'relative', width: '100%', height: '100%', cursor: 'pointer' }} onClick={() => { setFocusedStreamUser(vu.id); setFocusedStreamType('screen') }}>
+                              <video ref={el => { if (el && remoteScreenSrc) el.srcObject = remoteScreenSrc }} autoPlay playsInline className="voice-tile-video" />
+                            </div>
+                          ) : isScreenSharing && isLocal && !hasLocalCamera ? (
+                            /* Local screen share tile — show "View" button */
                             <div className="voice-tile-screen-preview">
                               <div className="voice-tile-avatar small" style={{ background: vu.avatarColor }}>
                                 {vu.username[0].toUpperCase()}
@@ -3681,7 +4263,7 @@ export default function Chat() {
                                 <span>{t('voice.sharingScreen').replace('{name}', vu.username)}</span>
                                 <button className="voice-watch-btn" onClick={(e) => { e.stopPropagation(); setFocusedStreamUser(vu.id); setFocusedStreamType('screen') }}>
                                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-                                  {isLocal ? t('voice.view') : t('voice.startViewing')}
+                                  {t('voice.view')}
                                 </button>
                               </div>
                             </div>
@@ -3830,6 +4412,8 @@ export default function Chat() {
           <>
             <div className="chat-header">
               <div className="chat-header-left">
+                <button className="mobile-back-btn" onClick={() => { setMobileInChat(false) }}><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 18 9 12 15 6"/></svg></button>
+                <button className="mobile-hamburger" onClick={() => setMobileNav(true)}><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg></button>
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" strokeWidth="2"><path d="M4 9h16M4 15h16M7 3l-2 18M17 3l-2 18"/></svg>
                 <h3>{activeChannel.name}</h3>
               </div>
@@ -3875,18 +4459,48 @@ export default function Chat() {
                       </div>
                     )
                     const { msg, isGrouped } = item
-                    if (msg.type === 'system') return (
-                      <div key={msg.id} className="system-message">
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+                    if (msg.type === 'system') {
+                      const isKick = msg.content.includes('исключил')
+                      const isRoleChange = msg.content.includes('роль')
+                      const isJoin = msg.content.includes('присоединил')
+                      const isLeave = msg.content.includes('покинул')
+                      const isRename = msg.content.includes('название канала')
+                      return (
+                      <div key={msg.id} className={`system-message ${isKick ? 'sys-kick' : isRoleChange ? 'sys-role' : isJoin ? 'sys-join' : isLeave ? 'sys-leave' : ''}`}>
+                        {isKick ? (
+                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M16 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="18" y1="8" x2="23" y2="13"/><line x1="23" y1="8" x2="18" y2="13"/></svg>
+                        ) : isRoleChange ? (
+                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M12 15a3 3 0 100-6 3 3 0 000 6z"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+                        ) : isJoin ? (
+                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+                        ) : isLeave ? (
+                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+                        ) : (
+                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                        )}
                         <span>{msg.content}</span>
                         <span className="system-message-time">{formatTime(msg.createdAt)}</span>
                       </div>
-                    )
+                    )}
                     if (hiddenMessages.has(msg.id)) return null
                     return (
-                      <div key={msg.id} id={'msg-' + msg.id} className={`message ${isGrouped ? 'grouped' : ''}${isMsgPinned(msg, false) ? ' pinned' : ''}${msg.deleted ? ' deleted-msg' : ''}`} onContextMenu={(e) => !msg.deleted && handleMsgContext(e, msg, false)}>
+                      <div key={msg.id} id={'msg-' + msg.id} className={`message ${isGrouped ? 'grouped' : ''}${isMsgPinned(msg, false) ? ' pinned' : ''}${msg.deleted ? ' deleted-msg' : ''}${selectMode && selectedMsgs.has(msg.id) ? ' selected' : ''}`} onContextMenu={(e) => !msg.deleted && handleMsgContext(e, msg, false)} onClick={() => selectMode && !msg.deleted && toggleMsgSelect(msg.id)} onMouseEnter={() => !selectMode && !msg.deleted && setHoveredMsg(msg.id)} onMouseLeave={() => hoveredMsg === msg.id && setHoveredMsg(null)} onDoubleClick={() => !selectMode && !msg.deleted && toggleReaction(msg.id, '👍', false)}>
+                        {hoveredMsg === msg.id && !selectMode && !msg.deleted && (
+                          <div className="msg-hover-actions">
+                            <button title={t('message.replyAction')} onClick={(e) => { e.stopPropagation(); setReplyTo(msg) }}><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 00-4-4H4"/></svg></button>
+                            <button title="👍" onClick={(e) => { e.stopPropagation(); toggleReaction(msg.id, '👍', false) }}>👍</button>
+                            <button title={t('emoji.search')} onClick={(e) => { openReactionPicker(e, msg.id, false) }}><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/></svg></button>
+                          </div>
+                        )}
+                        {selectMode && !msg.deleted && (
+                          <div className="msg-select-checkbox" onClick={(e) => { e.stopPropagation(); toggleMsgSelect(msg.id) }}>
+                            <div className={`msg-checkbox ${selectedMsgs.has(msg.id) ? 'checked' : ''}`}>
+                              {selectedMsgs.has(msg.id) && <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="3" strokeLinecap="round"><polyline points="20 6 9 17 4 12"/></svg>}
+                            </div>
+                          </div>
+                        )}
                         {isMsgPinned(msg, false) && !msg.deleted && <div className="msg-pin-indicator"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z"/></svg></div>}
-                        {!isGrouped && (
+                        {!isGrouped && !selectMode && (
                           <div className="msg-avatar clickable" style={{ background: msg.user.avatarColor }} onClick={(e) => showUserProfile(msg.user, e.clientX, e.clientY)}>
                             {msg.user.username[0].toUpperCase()}
                           </div>
@@ -3942,6 +4556,19 @@ export default function Chat() {
                               )}
                             </div>
                           )}
+                          {msg.reactions?.length > 0 && (
+                            <div className="msg-reactions">
+                              {msg.reactions.map((r, ri) => (
+                                <button key={ri} className={`msg-reaction ${r.users.includes(user.id) ? 'reacted' : ''}`} onClick={(e) => { e.stopPropagation(); toggleReaction(msg.id, r.emoji, false) }} onContextMenu={(e) => showReactionUsers(e, r.emoji, r.users, false)}>
+                                  <span className="reaction-emoji">{r.emoji}</span>
+                                  <span className="reaction-count">{r.users.length}</span>
+                                </button>
+                              ))}
+                              <button className="msg-reaction add-reaction" onClick={(e) => { openReactionPicker(e, msg.id, false) }}>
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg>
+                              </button>
+                            </div>
+                          )}
                         </div>
                         {isGrouped && <span className="msg-time-hover">{formatTime(msg.createdAt)}</span>}
                       </div>
@@ -3949,12 +4576,14 @@ export default function Chat() {
                   })}
                   <div ref={messagesEndRef} />
                 </div>
-                {typingUsers.length > 0 && (
-                  <div className="typing-indicator">
-                    <div className="typing-dots"><span/><span/><span/></div>
-                    <span>{typingUsers.map(u => u.username).join(', ')} {typingUsers.length === 1 ? t('typing.one') : t('typing.many')}</span>
-                  </div>
-                )}
+                <div className="typing-indicator-wrapper">
+                  {typingUsers.length > 0 && (
+                    <div className="typing-indicator">
+                      <div className="typing-dots"><span/><span/><span/></div>
+                      <span>{typingUsers.map(u => u.username).join(', ')} {typingUsers.length === 1 ? t('typing.one') : t('typing.many')}</span>
+                    </div>
+                  )}
+                </div>
               </div>
                 {showScrollBtn && (
                   <button className="scroll-bottom-btn" onClick={scrollToBottom} title={t('msg.scrollDown')}>
@@ -3976,6 +4605,7 @@ export default function Chat() {
                           <span className={streamerMode && m.id === user.id ? 'streamer-blur' : ''}>{m.username}<span className="user-tag">#{m.tag}</span></span>
                           {m.role === 'owner' && <span className="role-badge owner" title={t('members.owner')}>👑</span>}
                           {m.role === 'admin' && <span className="role-badge admin" title={t('role.admin')}>🛡️</span>}
+                          {(() => { const cr = (activeServer?.customRoles || []).find(r => r.id === m.role); return cr ? <span className="role-badge custom" style={{ color: cr.color }} title={cr.name}>{cr.name}</span> : null })()}
                         </div>
                       ))}
                     </>
@@ -3992,6 +4622,7 @@ export default function Chat() {
                           <span className={streamerMode && m.id === user.id ? 'streamer-blur' : ''}>{m.username}<span className="user-tag">#{m.tag}</span></span>
                           {m.role === 'owner' && <span className="role-badge owner" title={t('members.owner')}>👑</span>}
                           {m.role === 'admin' && <span className="role-badge admin" title={t('role.admin')}>🛡️</span>}
+                          {(() => { const cr = (activeServer?.customRoles || []).find(r => r.id === m.role); return cr ? <span className="role-badge custom" style={{ color: cr.color }} title={cr.name}>{cr.name}</span> : null })()}
                         </div>
                       ))}
                     </>
@@ -3999,7 +4630,25 @@ export default function Chat() {
                 </div>
               )}
             </div>
-            <form className="chat-input-form" onSubmit={sendMessage}>
+            {selectMode && (
+              <div className="select-bar">
+                <span className="select-bar-count">{(t('msg.selectedCount') || 'Выбрано: {count}').replace('{count}', selectedMsgs.size)}</span>
+                {canBulkDeleteForAll() && (
+                  <button className="select-bar-delete" onClick={() => bulkDeleteMsgs('forAll')} disabled={selectedMsgs.size === 0}>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
+                    <span>{t('msg.deleteForAll') || 'Удалить для всех'}</span>
+                  </button>
+                )}
+                <button className="select-bar-delete" onClick={() => bulkDeleteMsgs('forMe')} disabled={selectedMsgs.size === 0} style={{ background: 'var(--bg-secondary)' }}>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
+                  <span>{t('msg.deleteForMe') || 'Удалить для себя'}</span>
+                </button>
+                <button className="select-bar-cancel" onClick={() => { setSelectMode(false); setSelectedMsgs(new Set()) }}>
+                  <span>{t('common.cancel') || 'Отмена'}</span>
+                </button>
+              </div>
+            )}
+            <form className="chat-input-form" onSubmit={sendMessage} style={selectMode ? { display: 'none' } : undefined}>
               {replyTo && !replyTo.isDM && (
                 <div className="reply-bar">
                   <div className="reply-bar-line" style={{ background: replyTo.user?.avatarColor || 'var(--primary)' }} />
@@ -4059,6 +4708,31 @@ export default function Chat() {
                     </div>
                   )
                 })()}
+                <div className="emoji-btn-wrapper">
+                  <button type="button" className="input-btn emoji-toggle-btn" onClick={() => { setShowEmojiPicker(v => !v); setEmojiSearch(''); setEmojiCategory('smileys') }} title={t('emoji.title') || 'Эмодзи'}>
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/></svg>
+                  </button>
+                  {showEmojiPicker && (
+                    <div className="emoji-picker" ref={emojiPickerRef}>
+                      <div className="emoji-picker-search">
+                        <input type="text" placeholder={t('emoji.search') || 'Поиск...'} value={emojiSearch} onChange={e => setEmojiSearch(e.target.value)} autoFocus />
+                      </div>
+                      <div className="emoji-picker-cats">
+                        {Object.entries(emojiData).map(([key, cat]) => (
+                          <button key={key} className={`emoji-cat-btn ${emojiCategory === key ? 'active' : ''}`} onClick={() => setEmojiCategory(key)} title={cat.label}>{cat.icon}</button>
+                        ))}
+                      </div>
+                      <div className="emoji-picker-grid">
+                        {(emojiSearch
+                          ? Object.values(emojiData).flatMap(c => c.emojis)
+                          : emojiData[emojiCategory]?.emojis || []
+                        ).filter(e => !emojiSearch || e.includes(emojiSearch)).map((emoji, i) => (
+                          <button key={i} className="emoji-item" onClick={() => insertEmoji(emoji)}>{emoji}</button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
                 <button type="submit" className="input-btn send-btn" disabled={!input.trim() || slowmodeCooldown > 0}>
                   {slowmodeCooldown > 0 ? <span className="cooldown-badge">{slowmodeCooldown}</span> : <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg>}
                 </button>
@@ -4077,7 +4751,8 @@ export default function Chat() {
 
       {/* Message context menu */}
       {msgCtx && (
-        <div className="msg-ctx-menu" ref={msgCtxRef} style={{ top: msgCtx.y, left: msgCtx.x }}>
+        <div className="ctx-overlay" onClick={() => setMsgCtx(null)}>
+        <div className="msg-ctx-menu" ref={msgCtxRef} style={{ top: msgCtx.y, left: msgCtx.x }} onClick={e => e.stopPropagation()}>
           {!msgCtx.msg.deleted && !msgCtx.msg.type && (
             <button className="ctx-item" onClick={() => { setReplyTo({ id: msgCtx.msg.id, content: msgCtx.msg.content, user: msgCtx.msg.user, isDM: msgCtx.isDM }); setMsgCtx(null) }}>
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 00-4-4H4"/></svg>
@@ -4100,6 +4775,12 @@ export default function Chat() {
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z"/></svg>
             <span>{isMsgPinned(msgCtx.msg, msgCtx.isDM) ? t('msg.unpin') : t('msg.pin')}</span>
           </button>
+          {!msgCtx.msg.deleted && (
+            <button className="ctx-item" onClick={() => { setSelectMode(true); setSelectedMsgs(new Set([msgCtx.msg.id])); setMsgCtx(null) }}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg>
+              <span>{t('msg.select') || 'Выбрать'}</span>
+            </button>
+          )}
           {msgCtx.msg.userId === user.id && !msgCtx.msg.deleted && (
             <>
               <div className="ctx-divider" />
@@ -4117,10 +4798,12 @@ export default function Chat() {
             </>
           )}
         </div>
+        </div>
       )}
 
       {/* Member context menu */}
       {memberCtx && (
+        <div className="ctx-overlay" onClick={() => setMemberCtx(null)}>
         <div className="msg-ctx-menu" style={{ top: memberCtx.y, left: memberCtx.x }} onClick={e => e.stopPropagation()}>
           <div className="ctx-header">{memberCtx.member.username}</div>
           <button className="ctx-item" onClick={() => { showUserProfile(memberCtx.member, memberCtx.x, memberCtx.y); setMemberCtx(null) }}>
@@ -4144,6 +4827,19 @@ export default function Chat() {
                 <span>{t('server.makeAdmin')}</span>
               </button>
             )}
+            {(activeServer?.customRoles || []).map(cr => (
+              <button key={cr.id} className={`ctx-item ${memberCtx.member.role === cr.id ? 'ctx-active' : ''}`} onClick={async () => {
+                const newRole = memberCtx.member.role === cr.id ? 'user' : cr.id
+                try {
+                  await API(`/api/servers/${activeServer.id}/members/${memberCtx.member.id}/role`, { method: 'POST', body: JSON.stringify({ role: newRole }) })
+                  setMembers(prev => prev.map(m => m.id === memberCtx.member.id ? { ...m, role: newRole } : m))
+                } catch {}
+                setMemberCtx(null)
+              }}>
+                <span style={{ width: 10, height: 10, borderRadius: '50%', background: cr.color, display: 'inline-block', marginRight: 4 }} />
+                <span style={{ color: memberCtx.member.role === cr.id ? cr.color : undefined }}>{cr.name}{memberCtx.member.role === cr.id ? ' ✓' : ''}</span>
+              </button>
+            ))}
           </>)}
           {hasServerPerm('kickMembers') && memberCtx.member.role !== 'owner' && (
             <button className="ctx-item ctx-danger" onClick={() => { kickMember(memberCtx.member.id); setMemberCtx(null) }}>
@@ -4152,11 +4848,12 @@ export default function Chat() {
             </button>
           )}
         </div>
+        </div>
       )}
-      {memberCtx && <div className="ctx-overlay" onClick={() => setMemberCtx(null)} />}
 
       {/* Pin choice popup */}
       {pinChoiceCtx && (
+        <div className="ctx-overlay" onClick={() => setPinChoiceCtx(null)}>
         <div className="msg-ctx-menu" style={{ top: pinChoiceCtx.y, left: pinChoiceCtx.x }} onMouseDown={e => e.stopPropagation()}>
           <button className="ctx-item" onClick={() => pinWithMode('all')}>
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z"/></svg>
@@ -4167,10 +4864,12 @@ export default function Chat() {
             <span>{t('msg.pinForMe')}</span>
           </button>
         </div>
+        </div>
       )}
 
       {channelMenu && (
-        <div className="channel-gear-menu" ref={channelMenuRef} style={{ top: channelMenu.y, left: channelMenu.x }}>
+        <div className="ctx-overlay" onClick={() => setChannelMenu(null)}>
+        <div className="channel-gear-menu" ref={channelMenuRef} style={{ top: channelMenu.y, left: channelMenu.x }} onClick={e => e.stopPropagation()}>
           <button className="ctx-item" onClick={() => { markChannelRead(channelMenu.channel.id); setChannelMenu(null) }}>
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
             <span>{t('channel.markRead')}</span>
@@ -4211,15 +4910,24 @@ export default function Chat() {
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
             <span>{t('channel.copyId')}</span>
           </button>
-          {activeServer && activeServer.ownerId === user.id && (
+          {(activeServer && activeServer.ownerId === user.id) || hasServerPerm('clearChannel') ? (
             <>
               <div className="ctx-divider" />
+              <button className="ctx-item ctx-danger" onClick={() => clearChannelMessages(channelMenu.channel)}>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M5 6v14a2 2 0 002 2h10a2 2 0 002-2V6"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>
+                <span>{t('channel.clear') || 'Очистить канал'}</span>
+              </button>
+            </>
+          ) : null}
+          {activeServer && activeServer.ownerId === user.id && (
+            <>
               <button className="ctx-item ctx-danger" onClick={() => deleteChannel(channelMenu.channel)}>
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
                 <span>{t('channel.delete')}</span>
               </button>
             </>
           )}
+        </div>
         </div>
       )}
 
@@ -4533,6 +5241,12 @@ export default function Chat() {
                   {t('serverSettings.members')}
                 </button>
                 {isOwner && (
+                  <button className={`settings-nav-item ${serverSettingsTab === 'roles' ? 'active' : ''}`} onClick={() => setServerSettingsTab('roles')}>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+                    {t('serverSettings.roles') || 'Роли'}
+                  </button>
+                )}
+                {isOwner && (
                   <button className={`settings-nav-item ${serverSettingsTab === 'permissions' ? 'active' : ''}`} onClick={() => setServerSettingsTab('permissions')}>
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
                     {t('serverSettings.permissions')}
@@ -4581,30 +5295,130 @@ export default function Chat() {
                     <div className="srv-members-list">
                       {members.filter(m => !memberSearchQuery || m.username.toLowerCase().includes(memberSearchQuery.toLowerCase())).map(m => {
                         const mRole = activeServer.ownerId === m.id ? 'owner' : (m.role || 'user')
+                        const customRole = (activeServer.customRoles || []).find(r => r.id === mRole)
+                        const roleName = mRole === 'owner' ? t('role.owner') : mRole === 'admin' ? t('role.admin') : customRole ? customRole.name : t('role.member')
                         return (
                           <div key={m.id} className="srv-member-row">
                             <div className="srv-member-avatar" style={{ background: m.avatarColor }}>{m.username[0].toUpperCase()}</div>
                             <div className="srv-member-info">
                               <span className="srv-member-name">{m.username}<span className="user-tag">#{m.tag || '0000'}</span></span>
-                              <span className={`role-badge role-${mRole}`}>{mRole === 'owner' ? t('role.owner') : mRole === 'admin' ? t('role.admin') : t('role.member')}</span>
+                              <span className={`role-badge role-${mRole}`} style={customRole ? { color: customRole.color } : undefined}>{roleName}</span>
                             </div>
                             {canManageRoles && m.id !== user.id && mRole !== 'owner' && (
-                              <div className="srv-member-actions">
-                                {['user', 'admin'].map(r => (
-                                  <button key={r} className={`srv-role-btn ${mRole === r ? 'active-role-' + r : ''}`} onClick={async () => {
-                                    if (mRole === r) return
-                                    try {
-                                      await API(`/api/servers/${activeServer.id}/members/${m.id}/role`, { method: 'POST', body: JSON.stringify({ role: r }) })
-                                      setMembers(prev => prev.map(mm => mm.id === m.id ? { ...mm, role: r } : mm))
-                                    } catch {}
-                                  }}>{r === 'admin' ? t('role.admin') : t('role.member')}</button>
-                                ))}
+                              <div className="srv-member-actions" style={{ flexWrap: 'wrap', gap: 4 }}>
+                                {['user', 'admin', ...(activeServer.customRoles || []).map(r => r.id)].map(r => {
+                                  const cr = (activeServer.customRoles || []).find(cr => cr.id === r)
+                                  const label = r === 'admin' ? t('role.admin') : r === 'user' ? t('role.member') : cr?.name
+                                  return (
+                                    <button key={r} className={`srv-role-btn ${mRole === r ? 'active-role-' + (r === 'admin' ? 'admin' : r === 'user' ? 'user' : 'custom') : ''}`} style={cr && mRole === r ? { background: cr.color, borderColor: cr.color, color: '#fff' } : cr ? { borderColor: cr.color, color: cr.color } : undefined} onClick={async () => {
+                                      if (mRole === r) return
+                                      try {
+                                        await API(`/api/servers/${activeServer.id}/members/${m.id}/role`, { method: 'POST', body: JSON.stringify({ role: r }) })
+                                        setMembers(prev => prev.map(mm => mm.id === m.id ? { ...mm, role: r } : mm))
+                                      } catch {}
+                                    }}>{label}</button>
+                                  )
+                                })}
                               </div>
                             )}
                           </div>
                         )
                       })}
                     </div>
+                  </div>
+                )}
+                {serverSettingsTab === 'roles' && isOwner && (
+                  <div>
+                    <h3>{t('serverSettings.rolesTitle') || 'Кастомные роли'}</h3>
+                    <p className="perms-desc">{t('serverSettings.rolesDesc') || 'Создавайте роли с индивидуальными правами и назначайте их участникам.'}</p>
+                    {!editingRole ? (
+                      <>
+                        <button className="btn-submit" style={{ marginBottom: 16 }} onClick={() => setEditingRole({ name: '', permissions: {}, color: '#99aab5' })}>
+                          + {t('serverSettings.createRole') || 'Создать роль'}
+                        </button>
+                        <div className="srv-members-list">
+                          {(activeServer.customRoles || []).map(role => (
+                            <div key={role.id} className="srv-member-row" style={{ cursor: 'pointer' }} onClick={() => setEditingRole({ ...role })}>
+                              <div className="srv-member-avatar" style={{ background: role.color, width: 32, height: 32, fontSize: '.8rem' }}>
+                                {role.name[0]?.toUpperCase()}
+                              </div>
+                              <div className="srv-member-info">
+                                <span className="srv-member-name" style={{ color: role.color }}>{role.name}</span>
+                                <span style={{ fontSize: '.75rem', color: 'var(--text-secondary)' }}>
+                                  {members.filter(m => m.role === role.id).length} {t('members.title')?.toLowerCase() || 'участников'}
+                                </span>
+                              </div>
+                              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--text-secondary)" strokeWidth="2"><path d="M9 18l6-6-6-6"/></svg>
+                            </div>
+                          ))}
+                          {(activeServer.customRoles || []).length === 0 && (
+                            <p style={{ color: 'var(--text-secondary)', textAlign: 'center', padding: 20 }}>{t('serverSettings.noRoles') || 'Нет кастомных ролей'}</p>
+                          )}
+                        </div>
+                      </>
+                    ) : (
+                      <div>
+                        <button className="btn-cancel" style={{ marginBottom: 12 }} onClick={() => setEditingRole(null)}>
+                          ← {t('common.back') || 'Назад'}
+                        </button>
+                        <div className="field">
+                          <label>{t('serverSettings.roleName') || 'Название роли'}</label>
+                          <input type="text" value={editingRole.name} onChange={e => setEditingRole(prev => ({ ...prev, name: e.target.value }))} placeholder={t('serverSettings.roleNamePlaceholder') || 'Модератор'} autoFocus />
+                        </div>
+                        <div className="field">
+                          <label>{t('serverSettings.roleColor') || 'Цвет роли'}</label>
+                          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                            <input type="color" value={editingRole.color} onChange={e => setEditingRole(prev => ({ ...prev, color: e.target.value }))} style={{ width: 40, height: 32, border: 'none', background: 'none', cursor: 'pointer' }} />
+                            <span style={{ color: editingRole.color, fontWeight: 600 }}>{editingRole.name || '...'}</span>
+                          </div>
+                        </div>
+                        <h4 style={{ margin: '16px 0 8px' }}>{t('serverSettings.rolePerms') || 'Права роли'}</h4>
+                        {[
+                          { key: 'deleteMessages', label: t('perm.deleteMessages') },
+                          { key: 'deleteChannels', label: t('perm.deleteChannels') },
+                          { key: 'createChannels', label: t('perm.createChannels') },
+                          { key: 'kickMembers', label: t('perm.kickMembers') },
+                          { key: 'manageRoles', label: t('perm.manageRoles') },
+                          { key: 'clearChannel', label: t('perm.clearChannel') || 'Очищать каналы' },
+                          { key: 'bypassSlowmode', label: t('perm.bypassSlowmode') },
+                        ].map(p => (
+                          <div key={p.key} className="perm-toggle-row">
+                            <div className="perm-toggle-info"><div className="perm-toggle-label">{p.label}</div></div>
+                            <label className="toggle-switch">
+                              <input type="checkbox" checked={!!editingRole.permissions?.[p.key]} onChange={e => setEditingRole(prev => ({ ...prev, permissions: { ...prev.permissions, [p.key]: e.target.checked } }))} />
+                              <span className="toggle-slider" />
+                            </label>
+                          </div>
+                        ))}
+                        <div className="modal-actions" style={{ marginTop: 16 }}>
+                          {editingRole.id && (
+                            <button className="btn-cancel" style={{ color: 'var(--danger)', borderColor: 'var(--danger)' }} onClick={async () => {
+                              try {
+                                await API(`/api/servers/${activeServer.id}/roles/${editingRole.id}`, { method: 'DELETE' })
+                                setActiveServer(prev => prev ? { ...prev, customRoles: (prev.customRoles || []).filter(r => r.id !== editingRole.id) } : prev)
+                                setServers(prev => prev.map(s => s.id === activeServer.id ? { ...s, customRoles: (s.customRoles || []).filter(r => r.id !== editingRole.id) } : s))
+                                setMembers(prev => prev.map(m => m.role === editingRole.id ? { ...m, role: 'user' } : m))
+                              } catch {}
+                              setEditingRole(null)
+                            }}>{t('common.delete') || 'Удалить'}</button>
+                          )}
+                          <button className="btn-submit" disabled={!editingRole.name.trim()} onClick={async () => {
+                            try {
+                              if (editingRole.id) {
+                                const updated = await API(`/api/servers/${activeServer.id}/roles/${editingRole.id}`, { method: 'PUT', body: JSON.stringify({ name: editingRole.name, permissions: editingRole.permissions, color: editingRole.color }) })
+                                setActiveServer(prev => prev ? { ...prev, customRoles: (prev.customRoles || []).map(r => r.id === updated.id ? updated : r) } : prev)
+                                setServers(prev => prev.map(s => s.id === activeServer.id ? { ...s, customRoles: (s.customRoles || []).map(r => r.id === updated.id ? updated : r) } : s))
+                              } else {
+                                const created = await API(`/api/servers/${activeServer.id}/roles`, { method: 'POST', body: JSON.stringify({ name: editingRole.name, permissions: editingRole.permissions, color: editingRole.color }) })
+                                setActiveServer(prev => prev ? { ...prev, customRoles: [...(prev.customRoles || []), created] } : prev)
+                                setServers(prev => prev.map(s => s.id === activeServer.id ? { ...s, customRoles: [...(s.customRoles || []), created] } : s))
+                              }
+                            } catch {}
+                            setEditingRole(null)
+                          }}>{t('common.save') || 'Сохранить'}</button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
                 {serverSettingsTab === 'permissions' && isOwner && (
@@ -4617,6 +5431,7 @@ export default function Chat() {
                       { key: 'createChannels', label: t('perm.createChannels'), desc: t('perm.createChannelsDesc') },
                       { key: 'kickMembers', label: t('perm.kickMembers'), desc: t('perm.kickMembersDesc') },
                       { key: 'manageRoles', label: t('perm.manageRoles'), desc: t('perm.manageRolesDesc') },
+                      { key: 'clearChannel', label: t('perm.clearChannel') || 'Очищать каналы', desc: t('perm.clearChannelDesc') || 'Админы смогут очищать все сообщения в каналах' },
                       { key: 'bypassSlowmode', label: t('perm.bypassSlowmode'), desc: t('perm.bypassSlowmodeDesc') },
                     ].map(p => (
                       <div key={p.key} className="perm-toggle-row">
@@ -4650,11 +5465,13 @@ export default function Chat() {
       {showChannelSettings && (
         <div className="modal-overlay" onClick={() => setShowChannelSettings(null)}>
           <div className="modal modal-wide" onClick={e => e.stopPropagation()}>
-            <h3>{t('channel.settings')} #{showChannelSettings.name}</h3>
+            <h3>{t('channel.settings')} {showChannelSettings.type === 'voice' ? '🔊' : '#'}{showChannelSettings.name}</h3>
             <div className="settings-tabs">
               <button className={`settings-tab ${channelSettingsTab === 'general' ? 'active' : ''}`} onClick={() => setChannelSettingsTab('general')}>{t('chSettings.general')}</button>
               <button className={`settings-tab ${channelSettingsTab === 'permissions' ? 'active' : ''}`} onClick={() => setChannelSettingsTab('permissions')}>{t('chSettings.permissions')}</button>
-              <button className={`settings-tab ${channelSettingsTab === 'slowmode' ? 'active' : ''}`} onClick={() => setChannelSettingsTab('slowmode')}>{t('chSettings.slowmode')}</button>
+              {showChannelSettings.type !== 'voice' && (
+                <button className={`settings-tab ${channelSettingsTab === 'slowmode' ? 'active' : ''}`} onClick={() => setChannelSettingsTab('slowmode')}>{t('chSettings.slowmode')}</button>
+              )}
             </div>
 
             {channelSettingsTab === 'general' && (
@@ -4859,6 +5676,39 @@ export default function Chat() {
       )}
 
       {/* Confirm dialog */}
+      {reactionPickerMsg && (
+        <div className="reaction-picker-fixed" ref={reactionPickerRef} style={{ left: reactionPickerMsg.x, top: reactionPickerMsg.y }}>
+          <div className="emoji-picker-search"><input type="text" placeholder={t('emoji.search')} value={reactionSearch} onChange={e => setReactionSearch(e.target.value)} autoFocus /></div>
+          <div className="emoji-picker-cats">
+            {Object.entries(emojiData).map(([key, cat]) => (
+              <button key={key} className={`emoji-cat-btn ${reactionCategory === key ? 'active' : ''}`} onClick={() => setReactionCategory(key)}>{cat.icon}</button>
+            ))}
+          </div>
+          <div className="emoji-picker-grid">
+            {(reactionSearch ? Object.values(emojiData).flatMap(c => c.emojis) : emojiData[reactionCategory]?.emojis || []).filter(e => !reactionSearch || e.includes(reactionSearch)).map((emoji, i) => (
+              <button key={i} className="emoji-item" onClick={() => toggleReaction(reactionPickerMsg.id, emoji, reactionPickerMsg.isDM)}>{emoji}</button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {reactionUsersPopup && (
+        <div className="reaction-users-popup" style={{ left: reactionUsersPopup.x, top: reactionUsersPopup.y }} onMouseDown={e => e.stopPropagation()}>
+          <div className="reaction-users-header">
+            <span className="reaction-users-emoji">{reactionUsersPopup.emoji}</span>
+            <span className="reaction-users-count">{reactionUsersPopup.users.length}</span>
+          </div>
+          <div className="reaction-users-list">
+            {reactionUsersPopup.users.map(u => (
+              <div key={u.id} className="reaction-user-item">
+                <div className="reaction-user-avatar" style={{ background: u.avatarColor }}>{u.username[0]?.toUpperCase()}</div>
+                <span className="reaction-user-name">{u.username}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {confirmDialog && (
         <div className="modal-overlay confirm-overlay" onClick={() => setConfirmDialog(null)}>
           <div className="confirm-dialog" onClick={e => e.stopPropagation()}>
@@ -4887,17 +5737,23 @@ export default function Chat() {
           <div key={toast.id} className="toast-item" style={{ '--toast-i': i }} onClick={() => {
             if (toast.type === 'dm') {
               const dm = dmChannels.find(d => d.id === toast.dmChannelId)
-              if (dm) setActiveDM(dm)
+              if (dm) { setActiveDM(dm); if (isMobile) setMobileInChat(true) }
             } else if (toast.type === 'channel') {
               const srv = servers.find(s => s.id === toast.serverId)
               if (srv) { setActiveServer(srv); setShowFriends(false); setActiveDM(null) }
               const ch = channels.find(c => c.id === toast.channelId) || { id: toast.channelId }
-              setActiveChannel(ch)
+              setActiveChannel(ch); if (isMobile) setMobileInChat(true)
             }
             removeToast(toast.id)
           }}>
             <div className="toast-avatar" style={{ background: toast.avatarColor }}>{toast.username[0].toUpperCase()}</div>
             <div className="toast-body">
+              {toast.type === 'channel' && toast.serverName && (
+                <span className="toast-location">{toast.serverName} › #{toast.channelName}</span>
+              )}
+              {toast.type === 'dm' && (
+                <span className="toast-location">{t('nav.directMessages')}</span>
+              )}
               <span className="toast-username">{toast.username}</span>
               <span className="toast-content">{toast.content.length > 80 ? toast.content.slice(0, 80) + '…' : toast.content}</span>
             </div>
@@ -4908,8 +5764,55 @@ export default function Chat() {
         ))}
       </div>
 
-      {/* Hidden container for WebRTC audio elements */}
-      <div id="voice-audio-container" style={{ display: 'none' }} />
+      {/* Mobile floating voice bar */}
+      {voiceChannel && (
+        <div className="mobile-voice-bar" onClick={() => { setVoiceViewChannel(voiceChannel); setActiveChannel(null); setMobileNav(false); setMobileInChat(true) }}>
+          <div className="mobile-voice-bar-left">
+            <div className="mobile-voice-signal">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#43b581" strokeWidth="2.5" strokeLinecap="round"><path d="M2 20h.01M7 17a5 5 0 013-4.5M12 14a9 9 0 015-8"/></svg>
+            </div>
+            <div className="mobile-voice-info">
+              <span className="mobile-voice-connected">{t('voice.connected')}</span>
+              <span className="mobile-voice-channel">{voiceChannel.name}</span>
+            </div>
+          </div>
+          <div className="mobile-voice-bar-controls">
+            <button className={`mobile-voice-btn ${voiceMuted ? 'off' : ''}`} onClick={(e) => { e.stopPropagation(); toggleVoiceMute() }}>
+              {voiceMuted ? (
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><rect x="5" y="1" width="6" height="10" rx="3"/><path d="M13 7v1a5 5 0 01-10 0V7"/><line x1="1" y1="1" x2="15" y2="15"/></svg>
+              ) : (
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><rect x="9" y="1" width="6" height="11" rx="3"/><path d="M19 10v2a7 7 0 01-14 0v-2"/></svg>
+              )}
+            </button>
+            <button className="mobile-voice-btn disconnect" onClick={(e) => { e.stopPropagation(); leaveVoiceChannel() }}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M16 2L21 7M21 2L16 7"/><path d="M2 22c2-4 5-6 10-6s8 2 10 6"/></svg>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Mobile bottom navigation */}
+      <div className={`mobile-bottom-nav ${mobileInChat && (activeDM || activeChannel || voiceViewChannel) ? 'mobile-nav-in-chat' : ''}`}>
+        <button className={`mobile-nav-tab ${(mobileTab === 'home' || showFriends) && !activeServer ? 'active' : ''}`} onClick={() => { setMobileTab('home'); setShowFriends(true); setActiveServer(null); setActiveDM(null); setMobileInChat(false); setMobileNav(false) }}>
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+          <span>{t('nav.home') || 'Главная'}</span>
+          {(totalDMUnread + friendRequests.length) > 0 && <span className="mobile-nav-badge">{totalDMUnread + friendRequests.length}</span>}
+        </button>
+        <button className={`mobile-nav-tab ${mobileTab === 'notifications' ? 'active' : ''}`} onClick={() => { setMobileTab('notifications'); setShowFriends(true); setActiveDM(null); setActiveServer(null); setFriendsTab('pending'); setMobileInChat(true); setMobileNav(false) }}>
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/></svg>
+          <span>{t('nav.notifications') || 'Уведомления'}</span>
+          {friendRequests.length > 0 && <span className="mobile-nav-badge">{friendRequests.length}</span>}
+        </button>
+        <button className={`mobile-nav-tab ${mobileTab === 'profile' ? 'active' : ''}`} onClick={() => { setMobileTab('profile'); setShowProfileSettings(true) }}>
+          <div className="mobile-nav-avatar" style={{ background: user.avatarColor }}>
+            {user.username?.[0]?.toUpperCase()}
+          </div>
+          <span>{t('nav.profile') || 'Вы'}</span>
+        </button>
+      </div>
+
+      {/* Hidden container for WebRTC audio elements — positioned off-screen instead of display:none so browsers still play audio */}
+      <div id="voice-audio-container" style={{ position: 'fixed', top: '-9999px', left: '-9999px', opacity: 0, pointerEvents: 'none' }} />
       {copyTooltip && <div className="copy-toast" style={{ left: copyTooltip.x, top: copyTooltip.y }}>{t('common.copied')}</div>}
       {voiceUserCtx && (
         <div className="voice-user-ctx-overlay" onClick={() => setVoiceUserCtx(null)} onContextMenu={e => { e.preventDefault(); setVoiceUserCtx(null) }}>

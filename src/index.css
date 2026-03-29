@@ -51,6 +51,7 @@
   --idle: #f0b232;
 }
 
+:root { --keyboard-offset: 0px; }
 html, body, #root { height: 100%; }
 body {
   font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
