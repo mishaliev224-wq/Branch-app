@@ -18,6 +18,7 @@ export default function Auth() {
   const [captchaAnswer, setCaptchaAnswer] = useState('')
   const [successMsg, setSuccessMsg] = useState('')
   const [rememberMe, setRememberMe] = useState(false)
+  const [agreedToTerms, setAgreedToTerms] = useState(false)
   const { login } = useAuth()
 
   const loadCaptcha = useCallback(async () => {
@@ -98,12 +99,8 @@ export default function Auth() {
       </div>
       <div className="auth-card">
         <div className="auth-logo">
-          <svg width="40" height="40" viewBox="0 0 100 100">
-            <defs><linearGradient id="al" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stopColor="#00d4aa"/><stop offset="100%" stopColor="#7c5cfc"/></linearGradient></defs>
-            <circle cx="50" cy="50" r="45" fill="url(#al)"/>
-            <path d="M50 20L50 55M50 55L35 70M50 55L65 70M50 35L35 50M50 35L65 50" stroke="white" strokeWidth="4" strokeLinecap="round" fill="none"/>
-          </svg>
-          <span>Branch</span>
+          <img src="/logo.png" alt="Буст" width="40" height="40" style={{ borderRadius: '12px', objectFit: 'cover' }} />
+          <span>Буст</span>
         </div>
 
         {successMsg && <div className="auth-success">{successMsg}</div>}
@@ -176,7 +173,13 @@ export default function Auth() {
                   </div>
                 </div>
               )}
-              <button type="submit" className="auth-btn" disabled={loading}>
+              <label className="auth-agree" onClick={() => setAgreedToTerms(!agreedToTerms)}>
+                <div className={`remember-checkbox ${agreedToTerms ? 'checked' : ''}`}>
+                  {agreedToTerms && <svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M3 8l3.5 3.5L13 5" stroke="#fff" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"/></svg>}
+                </div>
+                <span>Я соглашаюсь с <a href="/terms" target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()}>Пользовательским соглашением</a> и <a href="/privacy" target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()}>Политикой конфиденциальности</a></span>
+              </label>
+              <button type="submit" className="auth-btn" disabled={loading || !agreedToTerms}>
                 {loading ? <span className="btn-loader" /> : t('auth.sendCode')}
               </button>
             </form>

@@ -4,8 +4,8 @@ import { fileURLToPath } from 'url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-// Start backend
-const server = fork(join(__dirname, 'server.js'), { stdio: 'inherit' });
+// Start backend (always on 3001, regardless of PORT env set by parent)
+const server = fork(join(__dirname, 'server.js'), { stdio: 'inherit', env: { ...process.env, PORT: '3001' } });
 
 // Start Vite frontend
 const vite = spawn(process.execPath, [join(__dirname, 'node_modules/vite/bin/vite.js'), '--port', '3000'], {

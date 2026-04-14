@@ -1215,6 +1215,17 @@ const translations = {
   }
 }
 
+// Dynamic translations loaded from server (for non-built-in languages)
+let dynamicCache = {}
+
+export function setDynamicTranslations(lang, map) {
+  dynamicCache[lang] = map
+}
+
+export function getDynamicTranslations(lang) {
+  return dynamicCache[lang] || null
+}
+
 export function getLanguage() {
   return localStorage.getItem('appLanguage') || 'ru'
 }
@@ -1225,7 +1236,128 @@ export function setLanguage(lang) {
 
 export function t(key) {
   const lang = getLanguage()
-  return translations[lang]?.[key] || translations['en']?.[key] || key
+  if (translations[lang]) return translations[lang]?.[key] || translations['ru']?.[key] || key
+  // Dynamic (auto-translated) language
+  const dyn = dynamicCache[lang]
+  if (dyn) return dyn[key] || translations['ru']?.[key] || key
+  // Fallback while loading
+  return translations['ru']?.[key] || key
 }
+
+// All translation keys from Russian (used as source for auto-translation)
+export function getAllKeys() {
+  return Object.keys(translations.ru)
+}
+
+export function getAllValues() {
+  return Object.values(translations.ru)
+}
+
+// Full language list (code: display name in that language)
+export const LANGUAGES = [
+  { code: 'ru', label: 'Русский', native: 'Русский', flag: '🇷🇺' },
+  { code: 'en', label: 'English', native: 'English', flag: '🇬🇧' },
+  { code: 'zh', label: '中文', native: '中文', flag: '🇨🇳' },
+  { code: 'af', label: 'Afrikaans', native: 'Afrikaans', flag: '🇿🇦' },
+  { code: 'sq', label: 'Shqip', native: 'Shqip', flag: '🇦🇱' },
+  { code: 'am', label: 'አማርኛ', native: 'አማርኛ', flag: '🇪🇹' },
+  { code: 'ar', label: 'العربية', native: 'العربية', flag: '🇸🇦' },
+  { code: 'hy', label: 'Հայերեն', native: 'Հայերեն', flag: '🇦🇲' },
+  { code: 'az', label: 'Azərbaycan', native: 'Azərbaycan', flag: '🇦🇿' },
+  { code: 'eu', label: 'Euskara', native: 'Euskara', flag: '🏴' },
+  { code: 'be', label: 'Беларуская', native: 'Беларуская', flag: '🇧🇾' },
+  { code: 'bn', label: 'বাংলা', native: 'বাংলা', flag: '🇧🇩' },
+  { code: 'bs', label: 'Bosanski', native: 'Bosanski', flag: '🇧🇦' },
+  { code: 'bg', label: 'Български', native: 'Български', flag: '🇧🇬' },
+  { code: 'ca', label: 'Català', native: 'Català', flag: '🏴' },
+  { code: 'ceb', label: 'Cebuano', native: 'Cebuano', flag: '🇵🇭' },
+  { code: 'hr', label: 'Hrvatski', native: 'Hrvatski', flag: '🇭🇷' },
+  { code: 'cs', label: 'Čeština', native: 'Čeština', flag: '🇨🇿' },
+  { code: 'da', label: 'Dansk', native: 'Dansk', flag: '🇩🇰' },
+  { code: 'nl', label: 'Nederlands', native: 'Nederlands', flag: '🇳🇱' },
+  { code: 'eo', label: 'Esperanto', native: 'Esperanto', flag: '🌍' },
+  { code: 'et', label: 'Eesti', native: 'Eesti', flag: '🇪🇪' },
+  { code: 'tl', label: 'Filipino', native: 'Filipino', flag: '🇵🇭' },
+  { code: 'fi', label: 'Suomi', native: 'Suomi', flag: '🇫🇮' },
+  { code: 'fr', label: 'Français', native: 'Français', flag: '🇫🇷' },
+  { code: 'gl', label: 'Galego', native: 'Galego', flag: '🇪🇸' },
+  { code: 'ka', label: 'ქართული', native: 'ქართული', flag: '🇬🇪' },
+  { code: 'de', label: 'Deutsch', native: 'Deutsch', flag: '🇩🇪' },
+  { code: 'el', label: 'Ελληνικά', native: 'Ελληνικά', flag: '🇬🇷' },
+  { code: 'gu', label: 'ગુજરાતી', native: 'ગુજરાતી', flag: '🇮🇳' },
+  { code: 'ht', label: 'Kreyòl ayisyen', native: 'Kreyòl', flag: '🇭🇹' },
+  { code: 'ha', label: 'Hausa', native: 'Hausa', flag: '🇳🇬' },
+  { code: 'iw', label: 'עברית', native: 'עברית', flag: '🇮🇱' },
+  { code: 'hi', label: 'हिन्दी', native: 'हिन्दी', flag: '🇮🇳' },
+  { code: 'hu', label: 'Magyar', native: 'Magyar', flag: '🇭🇺' },
+  { code: 'is', label: 'Íslenska', native: 'Íslenska', flag: '🇮🇸' },
+  { code: 'ig', label: 'Igbo', native: 'Igbo', flag: '🇳🇬' },
+  { code: 'id', label: 'Indonesia', native: 'Indonesia', flag: '🇮🇩' },
+  { code: 'ga', label: 'Gaeilge', native: 'Gaeilge', flag: '🇮🇪' },
+  { code: 'it', label: 'Italiano', native: 'Italiano', flag: '🇮🇹' },
+  { code: 'ja', label: '日本語', native: '日本語', flag: '🇯🇵' },
+  { code: 'jw', label: 'Jawa', native: 'Jawa', flag: '🇮🇩' },
+  { code: 'kn', label: 'ಕನ್ನಡ', native: 'ಕನ್ನಡ', flag: '🇮🇳' },
+  { code: 'kk', label: 'Қазақша', native: 'Қазақша', flag: '🇰🇿' },
+  { code: 'km', label: 'ខ្មែរ', native: 'ខ្មែរ', flag: '🇰🇭' },
+  { code: 'ko', label: '한국어', native: '한국어', flag: '🇰🇷' },
+  { code: 'ku', label: 'Kurdî', native: 'Kurdî', flag: '🏳' },
+  { code: 'ky', label: 'Кыргызча', native: 'Кыргызча', flag: '🇰🇬' },
+  { code: 'lo', label: 'ລາວ', native: 'ລາວ', flag: '🇱🇦' },
+  { code: 'la', label: 'Latina', native: 'Latina', flag: '🏛' },
+  { code: 'lv', label: 'Latviešu', native: 'Latviešu', flag: '🇱🇻' },
+  { code: 'lt', label: 'Lietuvių', native: 'Lietuvių', flag: '🇱🇹' },
+  { code: 'lb', label: 'Lëtzebuergesch', native: 'Lëtzebuergesch', flag: '🇱🇺' },
+  { code: 'mk', label: 'Македонски', native: 'Македонски', flag: '🇲🇰' },
+  { code: 'mg', label: 'Malagasy', native: 'Malagasy', flag: '🇲🇬' },
+  { code: 'ms', label: 'Melayu', native: 'Melayu', flag: '🇲🇾' },
+  { code: 'ml', label: 'മലയാളം', native: 'മലയാളം', flag: '🇮🇳' },
+  { code: 'mt', label: 'Malti', native: 'Malti', flag: '🇲🇹' },
+  { code: 'mi', label: 'Māori', native: 'Māori', flag: '🇳🇿' },
+  { code: 'mr', label: 'मराठी', native: 'मराठी', flag: '🇮🇳' },
+  { code: 'mn', label: 'Монгол', native: 'Монгол', flag: '🇲🇳' },
+  { code: 'my', label: 'မြန်မာ', native: 'မြန်မာ', flag: '🇲🇲' },
+  { code: 'ne', label: 'नेपाली', native: 'नेपाली', flag: '🇳🇵' },
+  { code: 'no', label: 'Norsk', native: 'Norsk', flag: '🇳🇴' },
+  { code: 'ny', label: 'Chichewa', native: 'Chichewa', flag: '🇲🇼' },
+  { code: 'or', label: 'ଓଡ଼ିଆ', native: 'ଓଡ଼ିଆ', flag: '🇮🇳' },
+  { code: 'ps', label: 'پښتو', native: 'پښتو', flag: '🇦🇫' },
+  { code: 'fa', label: 'فارسی', native: 'فارسی', flag: '🇮🇷' },
+  { code: 'pl', label: 'Polski', native: 'Polski', flag: '🇵🇱' },
+  { code: 'pt', label: 'Português', native: 'Português', flag: '🇵🇹' },
+  { code: 'pa', label: 'ਪੰਜਾਬੀ', native: 'ਪੰਜਾਬੀ', flag: '🇮🇳' },
+  { code: 'ro', label: 'Română', native: 'Română', flag: '🇷🇴' },
+  { code: 'sm', label: 'Samoan', native: 'Samoan', flag: '🇼🇸' },
+  { code: 'gd', label: 'Gàidhlig', native: 'Gàidhlig', flag: '🏴󠁧󠁢󠁳󠁣󠁴󠁿' },
+  { code: 'sr', label: 'Српски', native: 'Српски', flag: '🇷🇸' },
+  { code: 'st', label: 'Sesotho', native: 'Sesotho', flag: '🇱🇸' },
+  { code: 'sn', label: 'Shona', native: 'Shona', flag: '🇿🇼' },
+  { code: 'sd', label: 'سنڌي', native: 'سنڌي', flag: '🇵🇰' },
+  { code: 'si', label: 'සිංහල', native: 'සිංහල', flag: '🇱🇰' },
+  { code: 'sk', label: 'Slovenčina', native: 'Slovenčina', flag: '🇸🇰' },
+  { code: 'sl', label: 'Slovenščina', native: 'Slovenščina', flag: '🇸🇮' },
+  { code: 'so', label: 'Soomaali', native: 'Soomaali', flag: '🇸🇴' },
+  { code: 'es', label: 'Español', native: 'Español', flag: '🇪🇸' },
+  { code: 'su', label: 'Sunda', native: 'Sunda', flag: '🇮🇩' },
+  { code: 'sw', label: 'Kiswahili', native: 'Kiswahili', flag: '🇰🇪' },
+  { code: 'sv', label: 'Svenska', native: 'Svenska', flag: '🇸🇪' },
+  { code: 'tg', label: 'Тоҷикӣ', native: 'Тоҷикӣ', flag: '🇹🇯' },
+  { code: 'ta', label: 'தமிழ்', native: 'தமிழ்', flag: '🇮🇳' },
+  { code: 'tt', label: 'Татарча', native: 'Татарча', flag: '🇷🇺' },
+  { code: 'te', label: 'తెలుగు', native: 'తెలుగు', flag: '🇮🇳' },
+  { code: 'th', label: 'ไทย', native: 'ไทย', flag: '🇹🇭' },
+  { code: 'tr', label: 'Türkçe', native: 'Türkçe', flag: '🇹🇷' },
+  { code: 'tk', label: 'Türkmen', native: 'Türkmen', flag: '🇹🇲' },
+  { code: 'uk', label: 'Українська', native: 'Українська', flag: '🇺🇦' },
+  { code: 'ur', label: 'اردو', native: 'اردو', flag: '🇵🇰' },
+  { code: 'ug', label: 'ئۇيغۇرچە', native: 'ئۇيغۇرچە', flag: '🇨🇳' },
+  { code: 'uz', label: 'Oʻzbekcha', native: 'Oʻzbekcha', flag: '🇺🇿' },
+  { code: 'vi', label: 'Tiếng Việt', native: 'Tiếng Việt', flag: '🇻🇳' },
+  { code: 'cy', label: 'Cymraeg', native: 'Cymraeg', flag: '🏴󠁧󠁢󠁷󠁬󠁳󠁿' },
+  { code: 'xh', label: 'isiXhosa', native: 'isiXhosa', flag: '🇿🇦' },
+  { code: 'yi', label: 'ייִדיש', native: 'ייִדיש', flag: '🏳' },
+  { code: 'yo', label: 'Yorùbá', native: 'Yorùbá', flag: '🇳🇬' },
+  { code: 'zu', label: 'isiZulu', native: 'isiZulu', flag: '🇿🇦' },
+]
 
 export default translations

@@ -1,7 +1,145 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { io } from 'socket.io-client'
 import { useAuth, API } from './App.jsx'
-import { t, getLanguage, setLanguage as setLangStorage } from './i18n.js'
+import { t, getLanguage, setLanguage as setLangStorage, setDynamicTranslations, getDynamicTranslations, getAllKeys, getAllValues, LANGUAGES } from './i18n.js'
+
+const AImg = ({ src }) => src ? <img src={src} alt="" className="avatar-img-inner" /> : null
+
+const BANNER_COLORS = [
+  { name: 'Аметист',  value: '#7c5cfc' },
+  { name: 'Сапфир',   value: '#3b82f6' },
+  { name: 'Аква',     value: '#06b6d4' },
+  { name: 'Изумруд',  value: '#10b981' },
+  { name: 'Закат',    value: '#f59e0b' },
+  { name: 'Коралл',   value: '#f43f5e' },
+  { name: 'Малина',   value: '#ec4899' },
+  { name: 'Ночь',     value: '#334155' },
+]
+const startCallRingtone = () => {
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext
+    if (!Ctx) return null
+    const ctx = new Ctx()
+    let active = true
+    const scheduleBeeps = () => {
+      if (!active) return
+      const now = ctx.currentTime
+      for (let i = 0; i < 2; i++) {
+        const osc = ctx.createOscillator()
+        const gain = ctx.createGain()
+        osc.connect(gain); gain.connect(ctx.destination)
+        osc.frequency.value = i === 0 ? 480 : 440
+        const s = now + i * 0.55
+        gain.gain.setValueAtTime(0, s)
+        gain.gain.linearRampToValueAtTime(0.18, s + 0.05)
+        gain.gain.linearRampToValueAtTime(0, s + 0.45)
+        osc.start(s); osc.stop(s + 0.5)
+      }
+      setTimeout(scheduleBeeps, 2200)
+    }
+    scheduleBeeps()
+    return { stop: () => { active = false; ctx.close().catch(() => {}) } }
+  } catch { return null }
+}
+
+const bannerGradient = (color) =>
+  color ? `linear-gradient(135deg, ${color}ee 0%, ${color}88 100%)` : 'linear-gradient(135deg, #2a2a3a 0%, #1a1a2a 100%)'
+
+// Returns emoji count if text is ONLY 1-3 emojis, otherwise 0
+const emojiOnlyCount = (text) => {
+  if (!text) return 0
+  const re = /\p{Extended_Pictographic}(?:[\u{1F3FB}-\u{1F3FF}])?(?:\u200D\p{Extended_Pictographic}(?:[\u{1F3FB}-\u{1F3FF}])?)*\uFE0F?/gu
+  const stripped = text.replace(re, '').trim()
+  if (stripped.length > 0) return 0
+  const matches = text.match(re)
+  const count = matches ? matches.length : 0
+  return count >= 1 && count <= 3 ? count : 0
+}
+
+// Render message content with markdown + clickable links
+const renderContent = (text, customEmojis = []) => {
+  if (!text) return null
+  const lines = text.split('\n')
+  const result = []
+
+  // Process inline markdown in a segment (no newlines)
+  const parseInline = (str, key) => {
+    // Tokenize: URLs first, then markdown, then custom emojis :name:
+    const tokens = []
+    let last = 0
+    const re = /https?:\/\/[^\s<>"')\]]+|\*\*(.+?)\*\*|\*(.+?)\*|__(.+?)__|_(.+?)_|~~(.+?)~~|`([^`]+)`|\|\|(.+?)\|\||:([a-zA-Z0-9_]{2,32}):/g
+    let m
+    while ((m = re.exec(str)) !== null) {
+      if (m.index > last) tokens.push({ type: 'text', value: str.slice(last, m.index) })
+      if (m[0].startsWith('http')) {
+        tokens.push({ type: 'url', value: m[0] })
+      } else if (m[1] !== undefined) tokens.push({ type: 'bold', value: m[1] })
+      else if (m[2] !== undefined) tokens.push({ type: 'italic', value: m[2] })
+      else if (m[3] !== undefined) tokens.push({ type: 'bold', value: m[3] })
+      else if (m[4] !== undefined) tokens.push({ type: 'italic', value: m[4] })
+      else if (m[5] !== undefined) tokens.push({ type: 'strike', value: m[5] })
+      else if (m[6] !== undefined) tokens.push({ type: 'code', value: m[6] })
+      else if (m[7] !== undefined) tokens.push({ type: 'spoiler', value: m[7] })
+      else if (m[8] !== undefined) tokens.push({ type: 'custom-emoji', value: m[8] })
+      last = m.index + m[0].length
+    }
+    if (last < str.length) tokens.push({ type: 'text', value: str.slice(last) })
+
+    return tokens.map((tok, i) => {
+      const k = `${key}-${i}`
+      if (tok.type === 'url') {
+        const display = tok.value.length > 60 ? tok.value.slice(0, 57) + '…' : tok.value
+        return <a key={k} href={tok.value} target="_blank" rel="noopener noreferrer" className="msg-link">{display}</a>
+      }
+      if (tok.type === 'bold') return <strong key={k}>{tok.value}</strong>
+      if (tok.type === 'italic') return <em key={k}>{tok.value}</em>
+      if (tok.type === 'strike') return <s key={k}>{tok.value}</s>
+      if (tok.type === 'code') return <code key={k} className="msg-code-inline">{tok.value}</code>
+      if (tok.type === 'spoiler') return <span key={k} className="msg-spoiler">{tok.value}</span>
+      if (tok.type === 'custom-emoji') {
+        const ce = customEmojis.find(e => e.name === tok.value)
+        if (ce) return <img key={k} src={ce.url} alt={`:${ce.name}:`} title={`:${ce.name}:`} className="msg-custom-emoji" />
+        return `:${tok.value}:`
+      }
+      return tok.value
+    })
+  }
+
+  let i = 0
+  while (i < lines.length) {
+    const line = lines[i]
+    // Code block ```
+    if (line.trimStart().startsWith('```')) {
+      const lang = line.trimStart().slice(3).trim()
+      const codeLines = []
+      i++
+      while (i < lines.length && !lines[i].trimStart().startsWith('```')) {
+        codeLines.push(lines[i])
+        i++
+      }
+      result.push(<pre key={i} className="msg-code-block"><code>{codeLines.join('\n')}</code></pre>)
+      i++
+      continue
+    }
+    // Quote >
+    if (line.startsWith('> ')) {
+      result.push(<blockquote key={i} className="msg-blockquote">{parseInline(line.slice(2), i)}</blockquote>)
+      i++; continue
+    }
+    // Heading # ## ###
+    const hm = line.match(/^(#{1,3})\s(.+)/)
+    if (hm) {
+      const level = hm[1].length
+      const Tag = `h${level + 3}` // h4, h5, h6
+      result.push(<Tag key={i} className={`msg-heading msg-h${level}`}>{parseInline(hm[2], i)}</Tag>)
+      i++; continue
+    }
+    // Normal line
+    result.push(<span key={i}>{parseInline(line, i)}{i < lines.length - 1 && <br/>}</span>)
+    i++
+  }
+  return result
+}
 
 const ACCENT_COLORS = [
   { name: 'green', value: '#00d4aa' },
@@ -21,6 +159,8 @@ const applyAccentColor = (color) => {
   document.documentElement.style.setProperty('--primary', color)
   document.documentElement.style.setProperty('--primary-dim', `rgba(${r},${g},${b},0.15)`)
   document.documentElement.style.setProperty('--primary-glow', `rgba(${r},${g},${b},0.3)`)
+  document.documentElement.style.setProperty('--primary-subtle', `rgba(${r},${g},${b},0.05)`)
+  document.documentElement.style.setProperty('--primary-glow-deep', `rgba(${r},${g},${b},0.18)`)
   document.documentElement.style.setProperty('--primary-text', luminance > 0.5 ? '#000' : '#fff')
 }
 
@@ -33,7 +173,7 @@ const applyTheme = (theme) => {
   const theme = localStorage.getItem('appTheme') || 'dark'
   applyTheme(theme)
   const accent = localStorage.getItem('appAccent')
-  if (accent) applyAccentColor(accent)
+  applyAccentColor(accent || '#7c5cfc')
 })()
 
 const statusLabel = (s) => {
@@ -416,17 +556,35 @@ let socket = null
 
 export default function Chat() {
   const { user, setUser, logout } = useAuth()
+  const [showTermsPopup, setShowTermsPopup] = useState(false)
+  useEffect(() => { if (user && !user.agreedToTerms) setShowTermsPopup(true) }, [user?.agreedToTerms])
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
+  const [deleteConfirmText, setDeleteConfirmText] = useState('')
   const [servers, setServers] = useState([])
   const [activeServer, setActiveServer] = useState(null)
   const [channels, setChannels] = useState([])
   const [activeChannel, setActiveChannel] = useState(null)
   const [messages, setMessages] = useState([])
   const [members, setMembers] = useState([])
+  // Central profile store: { [userId]: { avatar, avatarColor, avatarFrame, statusEmoji, username, tag, status, bio, ... } }
+  // All renders read from here — single source of truth, survives message reloads
+  const [userProfiles, setUserProfiles] = useState({})
   const [input, setInput] = useState('')
   const [showEmojiPicker, setShowEmojiPicker] = useState(false)
   const [emojiSearch, setEmojiSearch] = useState('')
   const [emojiCategory, setEmojiCategory] = useState('smileys')
+  const [serverCustomEmojis, setServerCustomEmojis] = useState([]) // custom emojis for active server
+  const [serverSettingsEmojis, setServerSettingsEmojis] = useState([]) // for settings panel
+  const [emojiUploadName, setEmojiUploadName] = useState('')
+  const [emojiUploading, setEmojiUploading] = useState(false)
+  const emojiUploadRef = useRef(null)
   const emojiPickerRef = useRef(null)
+  const [showGifPicker, setShowGifPicker] = useState(false)
+  const [gifSearch, setGifSearch] = useState('')
+  const [gifResults, setGifResults] = useState([])
+  const [gifLoading, setGifLoading] = useState(false)
+  const gifPickerRef = useRef(null)
+  const gifSearchTimer = useRef(null)
   const [hoveredMsg, setHoveredMsg] = useState(null)
   const [reactionPickerMsg, setReactionPickerMsg] = useState(null) // { id, isDM, x, y }
   const [reactionSearch, setReactionSearch] = useState('')
@@ -469,15 +627,70 @@ export default function Chat() {
   const [showMembers, setShowMembers] = useState(true)
   const [showUserMenu, setShowUserMenu] = useState(false)
   const [showProfileSettings, setShowProfileSettings] = useState(false)
-  const [settingsTab, setSettingsTab] = useState('profile') // profile, app
-  const [profileForm, setProfileForm] = useState({ username: '', bio: '' })
+  const [showShop, setShowShop] = useState(false)
+  const [themePremiumPrompt, setThemePremiumPrompt] = useState(false)
+  const [shopTab, setShopTab] = useState('subscription') // 'subscription' | 'boosts'
+  const [premiumStatus, setPremiumStatus] = useState(null) // { premium, premiumExpiry, boostCredits, boostedServers, active }
+  const [boostData, setBoostData] = useState(null) // { total, used, free, boostedServers }
+  const [shopLoading, setShopLoading] = useState(false)
+  const [settingsTab, setSettingsTab] = useState('profile') // profile, app, privacy
+  const [privacyDeleteConfirm, setPrivacyDeleteConfirm] = useState(false)
+  const [privacyDeleteText, setPrivacyDeleteText] = useState('')
+  const [privacyDeleting, setPrivacyDeleting] = useState(false)
+  const [profileForm, setProfileForm] = useState({ username: '', bio: '', bannerColor: null, bannerImg: null, statusEmoji: null, avatarFrame: null })
+  const [showEmojiPickerProfile, setShowEmojiPickerProfile] = useState(false)
+  const avatarInputRef = useRef(null)
+  const bannerInputRef = useRef(null)
+  const [avatarCropModal, setAvatarCropModal] = useState(null) // { imgSrc, imgEl }
+  const [cropScale, setCropScale] = useState(1)
+  const [cropOffset, setCropOffset] = useState({ x: 0, y: 0 })
+  const cropDrag = useRef({ active: false, startX: 0, startY: 0, origX: 0, origY: 0 })
+  const [avatarUploading, setAvatarUploading] = useState(false)
+  const [bannerCropModal, setBannerCropModal] = useState(null) // { imgSrc, imgEl }
+  const [bannerCropScale, setBannerCropScale] = useState(1)
+  const [bannerCropOffset, setBannerCropOffset] = useState({ x: 0, y: 0 })
+  const bannerCropDrag = useRef({ active: false, startX: 0, startY: 0, origX: 0, origY: 0 })
+  const [bannerUploading, setBannerUploading] = useState(false)
+  const [showBannerOptions, setShowBannerOptions] = useState(false)
+  const [showBannerGifPicker, setShowBannerGifPicker] = useState(false)
+  const [bannerGifSearch, setBannerGifSearch] = useState('')
+  const [bannerGifResults, setBannerGifResults] = useState([])
+  const [bannerGifLoading, setBannerGifLoading] = useState(false)
+  const bannerGifSearchTimer = useRef(null)
+  const [serverAvatarCropModal, setServerAvatarCropModal] = useState(null)
+  const [serverCropScale, setServerCropScale] = useState(1)
+  const [serverCropOffset, setServerCropOffset] = useState({ x: 0, y: 0 })
+  const serverCropDrag = useRef({ active: false, startX: 0, startY: 0, origX: 0, origY: 0 })
+  const [serverAvatarUploading, setServerAvatarUploading] = useState(false)
+  const [serverLayout, setServerLayout] = useState(() => {
+    try { const s = localStorage.getItem('serverLayout'); if (s) return JSON.parse(s) } catch {}
+    return null
+  })
+  const [expandedFolders, setExpandedFolders] = useState(new Set())
+  const [srvDragState, setSrvDragState] = useState(null) // { id } | null
+  const [srvDragPos, setSrvDragPos] = useState({ x: 0, y: 0 })
+  const [srvDropTarget, setSrvDropTarget] = useState(null)
+  const srvDragRef = useRef({ active: false, moved: false, id: null, startY: 0, dropTarget: null })
+  const srvItemRefs = useRef({})
+  const effectiveLayoutRef = useRef([])
   const [profileSaving, setProfileSaving] = useState(false)
   const [profileError, setProfileError] = useState('')
   const [appLang, setAppLang] = useState(getLanguage)
+  const [langLoading, setLangLoading] = useState(false)
   const [appTheme, setAppTheme] = useState(() => localStorage.getItem('appTheme') || 'dark')
-  const [appAccent, setAppAccent] = useState(() => localStorage.getItem('appAccent') || '#00d4aa')
+  const [appAccent, setAppAccent] = useState(() => localStorage.getItem('appAccent') || '#7c5cfc')
+  const [timeFormat, setTimeFormat] = useState(() => localStorage.getItem('appTimeFormat') || '24')
   const [streamerMode, setStreamerMode] = useState(() => localStorage.getItem('streamerMode') === 'true')
   const [, forceUpdate] = useState(0)
+  // Restore cached dynamic translations on mount
+  useEffect(() => {
+    const lang = getLanguage()
+    const BUILTIN = ['ru', 'en', 'zh']
+    if (!BUILTIN.includes(lang)) {
+      const cached = localStorage.getItem(`i18n_cache_${lang}`)
+      if (cached) { try { setDynamicTranslations(lang, JSON.parse(cached)); forceUpdate(n => n + 1) } catch {} }
+    }
+  }, [])
   const [showFriends, setShowFriends] = useState(true)
   const [mobileNav, setMobileNav] = useState(false) // mobile sidebar open
   const [mobileInChat, setMobileInChat] = useState(false) // mobile: full-screen chat view
@@ -522,6 +735,8 @@ export default function Chat() {
   const [dmSearchExpanded, setDmSearchExpanded] = useState(null) // dmId of expanded result
   const dmCtxRef = useRef(null)
   const [dmMuteSub, setDmMuteSub] = useState(false)
+  const [dmDeleteSub, setDmDeleteSub] = useState(false)
+  const [dmClearSub, setDmClearSub] = useState(false)
   const [blockedUsers, setBlockedUsers] = useState([])
   const [blockedUsersDetails, setBlockedUsersDetails] = useState([])
   const [blockedByPartner, setBlockedByPartner] = useState(false)
@@ -529,6 +744,11 @@ export default function Chat() {
   const userProfileRef = useRef(null)
   const [serverCtx, setServerCtx] = useState(null)
   const serverCtxRef = useRef(null)
+  const [folderCtx, setFolderCtx] = useState(null) // { x, y, folder }
+  const folderCtxRef = useRef(null)
+  const [folderSettings, setFolderSettings] = useState(null) // { folder } editing state
+  const [folderSettingsName, setFolderSettingsName] = useState('')
+  const [folderSettingsColor, setFolderSettingsColor] = useState('')
   const [confirmDialog, setConfirmDialog] = useState(null)
   const [showServerMenu, setShowServerMenu] = useState(false)
   const serverMenuRef = useRef(null)
@@ -650,6 +870,23 @@ export default function Chat() {
   const cameraPopupRef = useRef(null)
   const gainNodeRef = useRef(null)
 
+  // ── DM Call state ──
+  const [dmCall, setDmCall] = useState(null) // { dmChannelId, partnerId, partnerUsername, partnerAvatarColor, status: 'calling'|'active' }
+  const [incomingDmCall, setIncomingDmCall] = useState(null) // { dmChannelId, caller: { id, username, avatarColor, tag } }
+  const [dmCallDuration, setDmCallDuration] = useState(0)
+  const dmCallRef = useRef(null)
+  const dmCallTimerRef = useRef(null)
+  const dmCallPeerConnection = useRef(null)
+  const dmCallLocalStream = useRef(null)
+  const dmCallMuted = useRef(false)
+  const [dmCallCameraOn, setDmCallCameraOn] = useState(false)
+  const [dmCallScreenOn, setDmCallScreenOn] = useState(false)
+  const [dmCallDeafened, setDmCallDeafened] = useState(false)
+  const dmCallCameraStream = useRef(null)
+  const dmCallScreenStream = useRef(null)
+  const dmCallRingtone = useRef(null)
+  useEffect(() => { dmCallRef.current = dmCall }, [dmCall])
+
   // ── Active server ref (for socket handlers) ──
   const activeServerRef = useRef(null)
   useEffect(() => { activeServerRef.current = activeServer }, [activeServer])
@@ -730,7 +967,7 @@ export default function Chat() {
 
   // Connect socket
   useEffect(() => {
-    const token = localStorage.getItem('token')
+    const token = localStorage.getItem('token') || sessionStorage.getItem('token')
     socket = io({
       auth: { token },
       reconnection: true,
@@ -745,9 +982,9 @@ export default function Chat() {
     socket.on('connect_error', (err) => {
       console.warn('[Socket] connect_error:', err.message)
       if (err.message === 'Invalid token' || err.message === 'Auth required' || err.message === 'User not found') {
-        // Token expired or invalid — re-login
         localStorage.removeItem('token')
-        window.location.reload()
+        sessionStorage.removeItem('token')
+        logout()
       }
     })
 
@@ -778,7 +1015,7 @@ export default function Chat() {
     })
 
     // Unread tracking for server channels
-    socket.on('channel-message-notify', ({ channelId, serverId, userId, username, avatarColor, content, attachment }) => {
+    socket.on('channel-message-notify', ({ channelId, serverId, userId, username, avatarColor, avatar, content, attachment }) => {
       if (userId === user.id) return // own messages
       if (activeChannelRef.current?.id === channelId) return // currently viewing
       setUnreadChannels(prev => ({ ...prev, [channelId]: (prev[channelId] || 0) + 1 }))
@@ -795,6 +1032,7 @@ export default function Chat() {
           channelName: ch?.name || '',
           username: username || 'User',
           avatarColor: avatarColor || '#666',
+          avatar: avatar || null,
           content: attachment ? (content || t('msg.attachment')) : (content || ''),
         })
         playSoundRef.current?.('message-receive')
@@ -814,15 +1052,40 @@ export default function Chat() {
     })
 
     socket.on('user-online', ({ userId }) => {
+      setUserProfiles(prev => ({ ...prev, [userId]: { ...(prev[userId] || {}), id: userId, status: 'online' } }))
       setMembers(prev => prev.map(m => m.id === userId ? { ...m, status: 'online' } : m))
     })
 
     socket.on('user-offline', ({ userId }) => {
+      setUserProfiles(prev => ({ ...prev, [userId]: { ...(prev[userId] || {}), id: userId, status: 'offline' } }))
       setMembers(prev => prev.map(m => m.id === userId ? { ...m, status: 'offline' } : m))
     })
 
     socket.on('user-status-changed', ({ userId, status }) => {
-      setMembers(prev => prev.map(m => m.id === userId ? { ...m, status } : m))
+      setUserProfiles(prev => ({ ...prev, [userId]: { ...(prev[userId] || {}), id: userId, status } }))
+      setUser(prev => prev?.id === userId ? { ...prev, status } : prev)
+    })
+
+    socket.on('user-status-emoji-changed', ({ userId, statusEmoji }) => {
+      setUserProfiles(prev => ({ ...prev, [userId]: { ...(prev[userId] || {}), id: userId, statusEmoji } }))
+      setUser(prev => prev?.id === userId ? { ...prev, statusEmoji } : prev)
+    })
+
+    socket.on('user-frame-changed', ({ userId, avatarFrame }) => {
+      setUserProfiles(prev => ({ ...prev, [userId]: { ...(prev[userId] || {}), id: userId, avatarFrame } }))
+      setUser(prev => prev?.id === userId ? { ...prev, avatarFrame } : prev)
+    })
+
+    socket.on('user-avatar-changed', ({ userId, avatar }) => {
+      setUserProfiles(prev => ({ ...prev, [userId]: { ...(prev[userId] || {}), id: userId, avatar } }))
+      setDmList(prev => prev.map(dm => dm.partner?.id === userId ? { ...dm, partner: { ...dm.partner, avatar } } : dm))
+      setDmCall(prev => prev?.partnerId === userId ? { ...prev, partnerAvatar: avatar } : prev)
+      setUser(prev => prev?.id === userId ? { ...prev, avatar } : prev)
+    })
+
+    socket.on('user-banner-changed', ({ userId, bannerImg }) => {
+      setUserProfiles(prev => ({ ...prev, [userId]: { ...(prev[userId] || {}), id: userId, bannerImg } }))
+      setUser(prev => prev?.id === userId ? { ...prev, bannerImg } : prev)
     })
 
     socket.on('friend-request-received', (fr) => {
@@ -883,6 +1146,7 @@ export default function Chat() {
             dmChannelId: msg.dmChannelId,
             username: msg.user?.username || 'User',
             avatarColor: msg.user?.avatarColor || '#666',
+            avatar: msg.user?.avatar || null,
             content: msg.attachment ? (msg.content || t('msg.attachment')) : (msg.content || ''),
           })
           playSoundRef.current?.('message-receive')
@@ -1008,6 +1272,10 @@ export default function Chat() {
       setActiveDM(prev => prev?.id === id ? null : prev)
     })
 
+    socket.on('dm-messages-cleared', ({ dmChannelId }) => {
+      if (activeDMRef.current?.id === dmChannelId) setDmMessages([])
+    })
+
     socket.on('message-error', ({ error }) => {
       setSlowmodeError(error)
       setTimeout(() => setSlowmodeError(null), 3000)
@@ -1035,6 +1303,18 @@ export default function Chat() {
     socket.on('server-roles-updated', ({ serverId, customRoles }) => {
       setServers(prev => prev.map(s => s.id === serverId ? { ...s, customRoles } : s))
       setActiveServer(prev => prev && prev.id === serverId ? { ...prev, customRoles } : prev)
+    })
+
+    socket.on('server-boost-updated', ({ serverId, boostCount, boostLevel }) => {
+      setServers(prev => prev.map(s => s.id === serverId ? { ...s, boostCount, boostLevel } : s))
+      setActiveServer(prev => prev && prev.id === serverId ? { ...prev, boostCount, boostLevel } : prev)
+    })
+
+    socket.on('server-emojis-updated', ({ serverId, emojis }) => {
+      setServers(prev => prev.map(s => s.id === serverId ? { ...s, customEmojis: emojis } : s))
+      setActiveServer(prev => prev && prev.id === serverId ? { ...prev, customEmojis: emojis } : prev)
+      setServerCustomEmojis(emojis)
+      setServerSettingsEmojis(emojis)
     })
 
     socket.on('role-deleted-reset', ({ serverId, roleId }) => {
@@ -1083,33 +1363,41 @@ export default function Chat() {
           pc._remoteUserId = fromUserId
           pc._polite = true // We are the answerer (polite)
           peerConnections.current[fromSocketId] = pc
-          if (localStream.current) {
-            localStream.current.getTracks().forEach(track => {
-              if (!pc.getSenders().find(s => s.track === track)) pc.addTrack(track, localStream.current)
-            })
-          }
-          if (cameraStream.current) {
-            cameraStream.current.getVideoTracks().forEach(track => {
-              if (!pc.getSenders().find(s => s.track === track)) pc.addTrack(track, cameraStream.current)
-            })
-          }
-          if (screenStream.current) {
-            screenStream.current.getVideoTracks().forEach(track => {
-              if (!pc.getSenders().find(s => s.track === track)) pc.addTrack(track, screenStream.current)
-            })
+          // Check if this is a DM call offer
+          const isDmCallOffer = dmCallRef.current && dmCallPeerConnection.current?._pendingLocal && dmCallPeerConnection.current._peerSocketId === fromSocketId
+          if (isDmCallOffer) {
+            pc._isDmCall = true
+            dmCallPeerConnection.current = pc
+            if (dmCallLocalStream.current) {
+              dmCallLocalStream.current.getTracks().forEach(track => {
+                if (!pc.getSenders().find(s => s.track === track)) pc.addTrack(track, dmCallLocalStream.current)
+              })
+            }
+          } else {
+            if (localStream.current) {
+              localStream.current.getTracks().forEach(track => {
+                if (!pc.getSenders().find(s => s.track === track)) pc.addTrack(track, localStream.current)
+              })
+            }
+            if (cameraStream.current) {
+              cameraStream.current.getVideoTracks().forEach(track => {
+                if (!pc.getSenders().find(s => s.track === track)) pc.addTrack(track, cameraStream.current)
+              })
+            }
+            if (screenStream.current) {
+              screenStream.current.getVideoTracks().forEach(track => {
+                if (!pc.getSenders().find(s => s.track === track)) pc.addTrack(track, screenStream.current)
+              })
+            }
           }
         }
         // Handle glare: if we're making an offer too, polite peer rolls back
         const offerCollision = pc._makingOffer || pc.signalingState !== 'stable'
         if (offerCollision && !pc._polite) return // impolite peer ignores incoming offer during collision
-        if (offerCollision) {
-          await Promise.all([
-            pc.setLocalDescription({ type: 'rollback' }),
-            pc.setRemoteDescription(new RTCSessionDescription(offer))
-          ].filter(Boolean))
-        } else {
-          await pc.setRemoteDescription(new RTCSessionDescription(offer))
+        if (offerCollision && pc.signalingState !== 'stable') {
+          await pc.setLocalDescription({ type: 'rollback' })
         }
+        await pc.setRemoteDescription(new RTCSessionDescription(offer))
         const answer = await pc.createAnswer()
         await pc.setLocalDescription(answer)
         socket.emit('voice-answer', { targetSocketId: fromSocketId, answer })
@@ -1154,6 +1442,67 @@ export default function Chat() {
         // If they still have screen, move screen stream from remoteVideoStreams to remoteScreenStreams if needed
         // Otherwise just let it be — the track will be removed via renegotiation
       }
+    })
+
+    // ── DM Call socket listeners ──
+    socket.on('dm-call-incoming', ({ dmChannelId, caller }) => {
+      setIncomingDmCall({ dmChannelId, caller })
+    })
+
+    socket.on('dm-call-accepted', async ({ dmChannelId, peers }) => {
+      const currentCall = dmCallRef.current
+      if (dmCallRingtone.current) { dmCallRingtone.current.stop(); dmCallRingtone.current = null }
+      setDmCall(prev => prev ? { ...prev, status: 'active' } : null)
+      setDmCallDuration(0)
+      if (dmCallTimerRef.current) clearInterval(dmCallTimerRef.current)
+      dmCallTimerRef.current = setInterval(() => setDmCallDuration(d => d + 1), 1000)
+      // Only the caller creates the offer; callee waits for voice-offer
+      const isCaller = currentCall?.status === 'calling'
+      if (isCaller && peers.length > 0) {
+        const peer = peers[0]
+        const pc = createPeerConnection(peer.socketId, socket)
+        pc._remoteUserId = peer.id
+        pc._polite = false
+        pc._isDmCall = true
+        dmCallPeerConnection.current = pc
+        peerConnections.current[peer.socketId] = pc
+        if (dmCallLocalStream.current) {
+          dmCallLocalStream.current.getTracks().forEach(track => {
+            if (!pc.getSenders().find(s => s.track === track)) pc.addTrack(track, dmCallLocalStream.current)
+          })
+        }
+        try {
+          const offer = await pc.createOffer()
+          await pc.setLocalDescription(offer)
+          socket.emit('voice-offer', { targetSocketId: peer.socketId, offer })
+        } catch (e) { console.warn('Failed to create DM call offer', e) }
+      } else if (!isCaller && peers.length > 0) {
+        // Callee: just save peer info, PC will be created by voice-offer handler
+        // But we need to make sure local stream is added when PC is created
+        // Store the peer socketId so voice-offer handler can add local stream
+        dmCallPeerConnection.current = { _peerSocketId: peers[0].socketId, _pendingLocal: true }
+      }
+      playVoiceSound('/voice_connect.wav', 1.5)
+    })
+
+    socket.on('dm-call-ended', ({ dmChannelId, reason, duration }) => {
+      setIncomingDmCall(null)
+      // Cleanup peer connection
+      if (dmCallPeerConnection.current) {
+        dmCallPeerConnection.current.close()
+        dmCallPeerConnection.current = null
+      }
+      if (dmCallLocalStream.current) {
+        if (dmCallLocalStream.current._rawStream) dmCallLocalStream.current._rawStream.getTracks().forEach(t => t.stop())
+        dmCallLocalStream.current.getTracks().forEach(t => t.stop())
+        if (dmCallLocalStream.current._audioCtx) dmCallLocalStream.current._audioCtx.close().catch(() => {})
+        dmCallLocalStream.current = null
+      }
+      if (dmCallTimerRef.current) { clearInterval(dmCallTimerRef.current); dmCallTimerRef.current = null }
+      document.getElementById('dm-call-audio')?.remove()
+      setDmCall(null)
+      setDmCallDuration(0)
+      playVoiceSound('/voice_disconnect.wav', 1.5)
     })
 
     socket.on('voice-sound', ({ type }) => {
@@ -1260,10 +1609,9 @@ export default function Chat() {
     }
     pc.onnegotiationneeded = async () => {
       try {
+        if (pc._makingOffer) return
         pc._makingOffer = true
-        const offer = await pc.createOffer()
-        if (pc.signalingState !== 'stable') return
-        await pc.setLocalDescription(offer)
+        await pc.setLocalDescription()
         sock.emit('voice-offer', { targetSocketId, offer: pc.localDescription })
       } catch (e) { console.warn('Negotiation needed error:', e) }
       finally { pc._makingOffer = false }
@@ -1340,7 +1688,7 @@ export default function Chat() {
     playVoiceSound('/voice_connect.wav', 1.5)
   }
 
-  const leaveVoiceChannel = () => {
+  const leaveVoiceChannel = (silent = false) => {
     socket.emit('voice-leave')
     // Stop speaking detection
     stopSpeakingDetection(localSpeakingRef.current)
@@ -1384,7 +1732,169 @@ export default function Chat() {
       setActiveChannel(null)
       setShowFriends(true)
     }
-    playVoiceSound('/voice_disconnect.wav', 1.5)
+    if (!silent) playVoiceSound('/voice_disconnect.wav', 1.5)
+  }
+
+  // ── DM Call functions ──
+  const startDmCall = async (dmChannelId, partner) => {
+    if (dmCallRef.current) endDmCall()
+    if (voiceChannel) leaveVoiceChannel(true)
+    // Acquire mic
+    let stream = null
+    try {
+      const rawStream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const ctx = new AudioContext()
+      const source = ctx.createMediaStreamSource(rawStream)
+      const gain = ctx.createGain()
+      gain.gain.value = 1
+      const dest = ctx.createMediaStreamDestination()
+      source.connect(gain)
+      gain.connect(dest)
+      stream = dest.stream
+      stream._rawStream = rawStream
+      stream._audioCtx = ctx
+      stream._gain = gain
+    } catch (err) {
+      console.warn('Mic not available for DM call', err)
+    }
+    dmCallLocalStream.current = stream
+    dmCallMuted.current = false
+    dmCallRingtone.current = startCallRingtone()
+    setDmCall({ dmChannelId, partnerId: partner.id, partnerUsername: partner.username, partnerAvatarColor: partner.avatarColor, partnerAvatar: partner.avatar, status: 'calling' })
+    socket?.emit('dm-call-start', { dmChannelId })
+  }
+
+  const acceptDmCall = async (dmChannelId, caller) => {
+    if (voiceChannel) leaveVoiceChannel(true)
+    if (dmCallRef.current) endDmCall()
+    // Acquire mic
+    let stream = null
+    try {
+      const rawStream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const ctx = new AudioContext()
+      const source = ctx.createMediaStreamSource(rawStream)
+      const gain = ctx.createGain()
+      gain.gain.value = 1
+      const dest = ctx.createMediaStreamDestination()
+      source.connect(gain)
+      gain.connect(dest)
+      stream = dest.stream
+      stream._rawStream = rawStream
+      stream._audioCtx = ctx
+      stream._gain = gain
+    } catch (err) {
+      console.warn('Mic not available for DM call', err)
+    }
+    dmCallLocalStream.current = stream
+    dmCallMuted.current = false
+    setDmCall({ dmChannelId, partnerId: caller.id, partnerUsername: caller.username, partnerAvatarColor: caller.avatarColor, partnerAvatar: caller.avatar, status: 'active' })
+    setDmCallDuration(0)
+    dmCallTimerRef.current = setInterval(() => setDmCallDuration(d => d + 1), 1000)
+    setIncomingDmCall(null)
+    socket?.emit('dm-call-accept', { dmChannelId })
+    playVoiceSound('/voice_connect.wav', 1.5)
+  }
+
+  const rejectDmCall = (dmChannelId) => {
+    socket?.emit('dm-call-reject', { dmChannelId })
+    setIncomingDmCall(null)
+  }
+
+  const endDmCall = () => {
+    const call = dmCallRef.current
+    if (!call) return
+    socket?.emit('dm-call-end', { dmChannelId: call.dmChannelId })
+    cleanupDmCall()
+  }
+
+  const cleanupDmCall = () => {
+    if (dmCallPeerConnection.current) {
+      dmCallPeerConnection.current.close()
+      dmCallPeerConnection.current = null
+    }
+    if (dmCallLocalStream.current) {
+      if (dmCallLocalStream.current._rawStream) dmCallLocalStream.current._rawStream.getTracks().forEach(t => t.stop())
+      dmCallLocalStream.current.getTracks().forEach(t => t.stop())
+      if (dmCallLocalStream.current._audioCtx) dmCallLocalStream.current._audioCtx.close().catch(() => {})
+      dmCallLocalStream.current = null
+    }
+    if (dmCallTimerRef.current) { clearInterval(dmCallTimerRef.current); dmCallTimerRef.current = null }
+    if (dmCallRingtone.current) { dmCallRingtone.current.stop(); dmCallRingtone.current = null }
+    if (dmCallCameraStream.current) { dmCallCameraStream.current.getTracks().forEach(t => t.stop()); dmCallCameraStream.current = null }
+    if (dmCallScreenStream.current) { dmCallScreenStream.current.getTracks().forEach(t => t.stop()); dmCallScreenStream.current = null }
+    // Remove any audio elements
+    document.getElementById('dm-call-audio')?.remove()
+    setDmCall(null)
+    setDmCallDuration(0)
+    dmCallMuted.current = false
+    setDmCallCameraOn(false)
+    setDmCallScreenOn(false)
+    setDmCallDeafened(false)
+  }
+
+  const toggleDmCallMute = () => {
+    if (!dmCallLocalStream.current) return
+    const track = dmCallLocalStream.current.getAudioTracks()[0]
+    if (track) {
+      dmCallMuted.current = !dmCallMuted.current
+      track.enabled = !dmCallMuted.current
+      setDmCall(prev => prev ? { ...prev } : null)
+    }
+  }
+
+  const toggleDmCallDeafen = () => {
+    const newDeafened = !dmCallDeafened
+    const audios = document.querySelectorAll('#voice-audio-container audio')
+    audios.forEach(a => { a.muted = newDeafened })
+    setDmCallDeafened(newDeafened)
+    playVoiceSound(newDeafened ? '/mute_toggle.m4a' : '/unmute.wav', 1.5)
+  }
+
+  const toggleDmCallCamera = async () => {
+    const pc = dmCallPeerConnection.current
+    if (dmCallCameraOn) {
+      if (dmCallCameraStream.current) {
+        const vt = dmCallCameraStream.current.getVideoTracks()[0]
+        if (pc && pc.getSenders) { const s = pc.getSenders().find(s => s.track === vt); if (s) pc.removeTrack(s) }
+        dmCallCameraStream.current.getTracks().forEach(t => t.stop())
+        dmCallCameraStream.current = null
+      }
+      setDmCallCameraOn(false)
+    } else {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true })
+        dmCallCameraStream.current = stream
+        const vt = stream.getVideoTracks()[0]
+        if (pc && pc.addTrack) pc.addTrack(vt, stream)
+        setDmCallCameraOn(true)
+      } catch (e) { console.warn('DM call camera denied', e) }
+    }
+  }
+
+  const toggleDmCallScreen = async () => {
+    const pc = dmCallPeerConnection.current
+    if (dmCallScreenOn) {
+      if (dmCallScreenStream.current) {
+        const vt = dmCallScreenStream.current.getVideoTracks()[0]
+        if (pc && pc.getSenders) { const s = pc.getSenders().find(s => s.track === vt); if (s) pc.removeTrack(s) }
+        dmCallScreenStream.current.getTracks().forEach(t => t.stop())
+        dmCallScreenStream.current = null
+      }
+      setDmCallScreenOn(false)
+    } else {
+      try {
+        const stream = await navigator.mediaDevices.getDisplayMedia({ video: { cursor: 'always' }, audio: false })
+        dmCallScreenStream.current = stream
+        const vt = stream.getVideoTracks()[0]
+        if (pc && pc.addTrack) pc.addTrack(vt, stream)
+        setDmCallScreenOn(true)
+        vt.onended = () => {
+          if (pc && pc.getSenders) { const s = pc.getSenders().find(s => s.track === vt); if (s) pc.removeTrack(s) }
+          dmCallScreenStream.current = null
+          setDmCallScreenOn(false)
+        }
+      } catch (e) { console.warn('DM call screen denied', e) }
+    }
   }
 
   const toggleVoiceMute = async () => {
@@ -1696,9 +2206,14 @@ export default function Chat() {
       setServers(prev => prev.filter(s => s.id !== activeServer.id))
       setActiveServer(null); setShowFriends(true); setChannels([]); setActiveChannel(null)
     })
-    API(`/api/servers/${activeServer.id}/members`).then(setMembers).catch(() => {})
+    API(`/api/servers/${activeServer.id}/members`).then(ms => { setMembers(ms); seedProfiles(ms) }).catch(() => {})
     // Load voice state
     API(`/api/servers/${activeServer.id}/voice`).then(data => setVoiceUsers(prev => ({ ...prev, ...data }))).catch(() => {})
+    // Load custom emojis
+    API(`/api/servers/${activeServer.id}/emojis`).then(emojis => {
+      setServerCustomEmojis(emojis)
+      setServerSettingsEmojis(emojis)
+    }).catch(() => { setServerCustomEmojis([]); setServerSettingsEmojis([]) })
   }, [activeServer?.id])
 
   // Clear reply when switching context
@@ -1709,7 +2224,7 @@ export default function Chat() {
     if (!activeChannel) { setMessages([]); setPinnedMessages([]); return }
     // Leave prev, join new
     socket?.emit('join-channel', activeChannel.id)
-    API(`/api/channels/${activeChannel.id}/messages`).then(setMessages)
+    API(`/api/channels/${activeChannel.id}/messages`).then(msgs => { setMessages(msgs); seedProfiles(msgs.map(m => m.user).filter(Boolean)) })
     API(`/api/channels/${activeChannel.id}/pinned`).then(p => { setPinnedMessages(p); setPinnedIndex(0) }).catch(() => setPinnedMessages([]))
     setTypingUsers([])
     // Clear unread for this channel
@@ -1717,14 +2232,28 @@ export default function Chat() {
     return () => { socket?.emit('leave-channel', activeChannel.id) }
   }, [activeChannel?.id])
 
-  // Scroll to bottom on new messages (only if near bottom)
+  // Track which channel was already scrolled — force scroll on first messages load per channel
+  const scrolledChannelRef = useRef(null)
   useEffect(() => {
-    const area = messagesAreaRef.current
-    if (area) {
-      const atBottom = area.scrollHeight - area.scrollTop - area.clientHeight < 150
-      if (atBottom) messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    scrolledChannelRef.current = null
+  }, [activeChannel?.id, activeDM?.id])
+
+  // Scroll to bottom on new messages
+  useEffect(() => {
+    const channelKey = activeChannel?.id || activeDM?.id || null
+    if (scrolledChannelRef.current !== channelKey) {
+      // First batch of messages for this channel — always scroll to bottom instantly
+      messagesEndRef.current?.scrollIntoView({ behavior: 'instant' })
+      scrolledChannelRef.current = channelKey
     } else {
-      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+      // Subsequent messages — only scroll if already near bottom
+      const area = messagesAreaRef.current
+      if (area) {
+        const atBottom = area.scrollHeight - area.scrollTop - area.clientHeight < 150
+        if (atBottom) messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+      } else {
+        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+      }
     }
   }, [messages, dmMessages])
 
@@ -1771,11 +2300,23 @@ export default function Chat() {
   }
 
   const handleInput = (e) => {
-    setInput(e.target.value)
+    setInput(e.target.value.slice(0, 1500))
+    // Auto-resize textarea
+    e.target.style.height = 'auto'
+    e.target.style.height = Math.min(e.target.scrollHeight, 160) + 'px'
     if (!activeChannel) return
     socket.emit('typing', { channelId: activeChannel.id })
     clearTimeout(typingTimeout.current)
     typingTimeout.current = setTimeout(() => {}, 3000)
+  }
+
+  const handleChatKeyDown = (e, sendFn) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      sendFn(e)
+      // Reset textarea height
+      e.target.style.height = 'auto'
+    }
   }
 
   const createServer = async (e) => {
@@ -1830,18 +2371,103 @@ export default function Chat() {
     setShowUserMenu(false)
   }
 
+  const openShop = async (tab = 'subscription') => {
+    setShopTab(tab)
+    setShowShop(true)
+    setShowUserMenu(false)
+    try {
+      const [status, boosts] = await Promise.all([
+        API('/api/premium/status'),
+        API('/api/boosts/my'),
+      ])
+      setPremiumStatus(status)
+      setBoostData(boosts)
+    } catch {}
+  }
+
+  const activatePremium = async (tier) => {
+    setShopLoading(true)
+    try {
+      await API('/api/premium/activate', { method: 'POST', body: JSON.stringify({ tier }) })
+      const [status, boosts] = await Promise.all([API('/api/premium/status'), API('/api/boosts/my')])
+      setPremiumStatus(status)
+      setBoostData(boosts)
+      setUser(u => ({ ...u, premium: status.premium, premiumExpiry: status.premiumExpiry }))
+    } catch (e) { alert(e.message) }
+    setShopLoading(false)
+  }
+
+  const cancelPremium = async () => {
+    if (!window.confirm('Отменить подписку? Все голоса будут сняты с серверов.')) return
+    setShopLoading(true)
+    try {
+      await API('/api/premium/cancel', { method: 'DELETE' })
+      const [status, boosts] = await Promise.all([API('/api/premium/status'), API('/api/boosts/my')])
+      setPremiumStatus(status)
+      setBoostData(boosts)
+      setUser(u => ({ ...u, premium: null, premiumExpiry: null }))
+    } catch (e) { alert(e.message) }
+    setShopLoading(false)
+  }
+
+  const giveBoost = async (serverId, amount) => {
+    try {
+      await API('/api/boosts/give', { method: 'POST', body: JSON.stringify({ serverId, amount }) })
+      const boosts = await API('/api/boosts/my')
+      setBoostData(boosts)
+    } catch (e) { alert(e.message) }
+  }
+
+  const removeBoost = async (serverId, amount) => {
+    try {
+      await API('/api/boosts/remove', { method: 'POST', body: JSON.stringify({ serverId, amount }) })
+      const boosts = await API('/api/boosts/my')
+      setBoostData(boosts)
+    } catch (e) { alert(e.message) }
+  }
+
   const openProfileSettings = () => {
-    setProfileForm({ username: user.username, bio: user.bio || '' })
+    setProfileForm({ username: user.username, bio: user.bio || '', bannerColor: user.bannerColor || null, bannerImg: user.bannerImg || null, statusEmoji: user.statusEmoji || null, avatarFrame: user.avatarFrame || null })
     setProfileError('')
     setSettingsTab('profile')
+    setPrivacyDeleteConfirm(false)
+    setPrivacyDeleteText('')
     setShowProfileSettings(true)
     setShowUserMenu(false)
   }
 
-  const changeLanguage = (lang) => {
+  const changeLanguage = async (lang) => {
+    const BUILTIN = ['ru', 'en', 'zh']
     setLangStorage(lang)
     setAppLang(lang)
-    forceUpdate(n => n + 1) // force re-render to apply translations
+    if (!BUILTIN.includes(lang)) {
+      // Check localStorage cache
+      const cacheKey = `i18n_cache_${lang}`
+      const cached = localStorage.getItem(cacheKey)
+      if (cached) {
+        try {
+          setDynamicTranslations(lang, JSON.parse(cached))
+          forceUpdate(n => n + 1)
+          return
+        } catch {}
+      }
+      // Fetch translation from server
+      setLangLoading(true)
+      try {
+        const keys = getAllKeys()
+        const values = getAllValues()
+        const data = await API('/api/translate', { method: 'POST', body: JSON.stringify({ texts: values, to: lang, from: 'ru' }) })
+        const map = {}
+        keys.forEach((k, i) => { map[k] = data.translations[i] ?? values[i] })
+        setDynamicTranslations(lang, map)
+        localStorage.setItem(cacheKey, JSON.stringify(map))
+      } catch (err) {
+        console.error('Translation failed:', err)
+      } finally {
+        setLangLoading(false)
+      }
+    }
+    forceUpdate(n => n + 1)
   }
 
   const changeTheme = (theme) => {
@@ -1873,7 +2499,7 @@ export default function Chat() {
 
   // Load friends data
   const loadFriends = () => {
-    API('/api/friends').then(setFriends).catch(() => {})
+    API('/api/friends').then(fs => { setFriends(fs); seedProfiles(fs) }).catch(() => {})
     API('/api/friends/requests').then(setFriendRequests).catch(() => {})
     API('/api/friends/requests/sent').then(data => {
       setOutgoingRequests(data)
@@ -1882,10 +2508,12 @@ export default function Chat() {
   }
 
   useEffect(() => { loadFriends() }, [])
+  // Seed self into profile store
+  useEffect(() => { if (user?.id) patchProfile(user.id, user) }, [user?.id])
 
   // Load DM channels
   const loadDmChannels = () => {
-    API('/api/dm-channels').then(setDmChannels).catch(() => {})
+    API('/api/dm-channels').then(dms => { setDmChannels(dms); seedProfiles(dms.map(d => d.partner).filter(Boolean)) }).catch(() => {})
   }
   useEffect(() => { loadDmChannels() }, [])
 
@@ -1893,7 +2521,7 @@ export default function Chat() {
   useEffect(() => {
     if (!activeDM) { setDmMessages([]); setDmPinnedMessages([]); return }
     socket?.emit('join-dm', activeDM.id)
-    API(`/api/dm-channels/${activeDM.id}/messages`).then(setDmMessages)
+    API(`/api/dm-channels/${activeDM.id}/messages`).then(msgs => { setDmMessages(msgs); seedProfiles(msgs.map(m => m.user).filter(Boolean)) })
     API(`/api/dm-channels/${activeDM.id}/pinned`).then(p => { setDmPinnedMessages(p); setDmPinnedIndex(0) }).catch(() => setDmPinnedMessages([]))
     // Clear unread for this DM
     setUnreadDMs(prev => { const n = { ...prev }; delete n[activeDM.id]; return n })
@@ -1911,6 +2539,175 @@ export default function Chat() {
       setAllChannels(results.flat())
     })
   }, [servers.length])
+  // Server layout (drag-reorder + folders)
+  const effectiveLayout = useMemo(() => {
+    const serverSet = new Set(servers.map(s => s.id))
+    const base = serverLayout || servers.map(s => ({ type: 'server', id: s.id }))
+    const allLayoutIds = new Set()
+    base.forEach(item => {
+      if (item.type === 'server') allLayoutIds.add(item.id)
+      else if (item.type === 'folder') item.serverIds.forEach(id => allLayoutIds.add(id))
+    })
+    const missing = servers.filter(s => !allLayoutIds.has(s.id)).map(s => ({ type: 'server', id: s.id }))
+    const clean = base.map(item => {
+      if (item.type === 'server') return serverSet.has(item.id) ? item : null
+      if (item.type === 'folder') {
+        const ids = item.serverIds.filter(id => serverSet.has(id))
+        return ids.length > 0 ? { ...item, serverIds: ids } : null
+      }
+      return null
+    }).filter(Boolean)
+    return [...clean, ...missing]
+  }, [serverLayout, servers])
+
+  effectiveLayoutRef.current = effectiveLayout
+
+  const saveServerLayout = (layout) => {
+    setServerLayout(layout)
+    localStorage.setItem('serverLayout', JSON.stringify(layout))
+  }
+
+  const extractFromFolder = (layout, dragId) => {
+    // If dragId is inside a folder, remove it and return cleaned layout + whether it was in a folder
+    const folderIdx = layout.findIndex(item => item.type === 'folder' && item.serverIds.includes(dragId))
+    if (folderIdx === -1) return { layout, wasInFolder: false }
+    const folder = layout[folderIdx]
+    const newServerIds = folder.serverIds.filter(id => id !== dragId)
+    const newLayout = layout.map((item, i) => {
+      if (i !== folderIdx) return item
+      return newServerIds.length > 0 ? { ...item, serverIds: newServerIds } : null
+    }).filter(Boolean)
+    return { layout: newLayout, wasInFolder: true }
+  }
+
+  const executeSrvDrop = (dragId, drop) => {
+    const layout = effectiveLayoutRef.current
+    const srvs = serversRef.current
+    if (drop.action === 'reorder') {
+      // First extract from folder if needed
+      const { layout: baseLayout, wasInFolder } = extractFromFolder(layout, dragId)
+      const newLayout = [...baseLayout]
+      const dragIdx = newLayout.findIndex(item =>
+        (item.type === 'server' && item.id === dragId) ||
+        (item.type === 'folder' && item.folderId === dragId)
+      )
+      if (dragIdx === -1) {
+        // Was in folder and now extracted — just insert at drop position
+        let at = Math.min(drop.insertAt, newLayout.length)
+        newLayout.splice(at, 0, { type: 'server', id: dragId })
+        saveServerLayout(newLayout)
+        return
+      }
+      const [dragged] = newLayout.splice(dragIdx, 1)
+      let at = drop.insertAt
+      if (dragIdx < at) at--
+      newLayout.splice(Math.min(at, newLayout.length), 0, dragged)
+      saveServerLayout(newLayout)
+    } else if (drop.action === 'merge') {
+      const { layout: baseLayout } = extractFromFolder(layout, dragId)
+      const targetIdx = baseLayout.findIndex(item => item.type === 'server' && item.id === drop.targetServerId)
+      if (targetIdx === -1) return
+      const newLayout = baseLayout.filter(item =>
+        !(item.type === 'server' && (item.id === dragId || item.id === drop.targetServerId))
+      )
+      const dragServer = srvs.find(s => s.id === dragId)
+      const newFolder = {
+        type: 'folder',
+        folderId: 'folder_' + Date.now(),
+        name: 'Папка',
+        serverIds: [drop.targetServerId, dragId],
+        color: appAccent
+      }
+      let insertPos = targetIdx
+      if (baseLayout.findIndex(item => item.type === 'server' && item.id === dragId) < targetIdx) insertPos--
+      newLayout.splice(Math.max(0, insertPos), 0, newFolder)
+      saveServerLayout(newLayout)
+    } else if (drop.action === 'add-to-folder') {
+      const { layout: baseLayout } = extractFromFolder(layout, dragId)
+      const newLayout = baseLayout.map(item => {
+        if (item.type === 'folder' && item.folderId === drop.folderId) {
+          if (item.serverIds.includes(dragId)) return item
+          return { ...item, serverIds: [...item.serverIds, dragId] }
+        }
+        return item
+      }).filter(item => !(item.type === 'server' && item.id === dragId))
+      saveServerLayout(newLayout)
+    }
+  }
+
+  const startSrvDrag = (e, dragId) => {
+    if (e.button !== 0) return
+    const srv = serversRef.current.find(s => s.id === dragId)
+    if (srv?.verified) return
+    e.preventDefault()
+    e.stopPropagation()
+    srvDragRef.current = { active: true, moved: false, id: dragId, startY: e.clientY, dropTarget: null }
+
+    const getSortedRects = () =>
+      Object.entries(srvItemRefs.current)
+        .map(([id, el]) => {
+          if (!el) return null
+          const rect = el.getBoundingClientRect()
+          return { id, rect, itemType: el.dataset.itemType, verified: el.dataset.verified === 'true' }
+        })
+        .filter(Boolean)
+        .sort((a, b) => a.rect.top - b.rect.top)
+
+    const calcDrop = (mouseY) => {
+      const rects = getSortedRects()
+      for (let i = 0; i < rects.length; i++) {
+        const { id, rect, itemType, verified } = rects[i]
+        if (mouseY < rect.top) return { action: 'reorder', insertAt: i }
+        if (mouseY <= rect.bottom) {
+          if (id === dragId) {
+            return mouseY <= (rect.top + rect.bottom) / 2
+              ? { action: 'reorder', insertAt: i }
+              : { action: 'reorder', insertAt: i + 1 }
+          }
+          if (itemType === 'folder') return { action: 'add-to-folder', folderId: id }
+          if (!verified) {
+            const third = (rect.bottom - rect.top) / 3
+            if (mouseY > rect.top + third && mouseY < rect.bottom - third) {
+              return { action: 'merge', targetServerId: id }
+            }
+          }
+          return mouseY <= (rect.top + rect.bottom) / 2
+            ? { action: 'reorder', insertAt: i }
+            : { action: 'reorder', insertAt: i + 1 }
+        }
+      }
+      return { action: 'reorder', insertAt: rects.length }
+    }
+
+    const onMove = (me) => {
+      if (!srvDragRef.current.active) return
+      if (!srvDragRef.current.moved && Math.abs(me.clientY - srvDragRef.current.startY) > 4) {
+        srvDragRef.current.moved = true
+        setSrvDragState({ id: dragId })
+      }
+      if (srvDragRef.current.moved) {
+        setSrvDragPos({ x: me.clientX, y: me.clientY })
+        const drop = calcDrop(me.clientY)
+        srvDragRef.current.dropTarget = drop
+        setSrvDropTarget(drop)
+      }
+    }
+
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove)
+      document.removeEventListener('mouseup', onUp)
+      if (srvDragRef.current.moved && srvDragRef.current.dropTarget) {
+        executeSrvDrop(srvDragRef.current.id, srvDragRef.current.dropTarget)
+      }
+      srvDragRef.current = { active: false, moved: false, id: null, startY: 0, dropTarget: null }
+      setSrvDragState(null)
+      setSrvDropTarget(null)
+    }
+
+    document.addEventListener('mousemove', onMove)
+    document.addEventListener('mouseup', onUp)
+  }
+
   const getServerUnreadAll = (serverId) => {
     return allChannels.filter(c => c.serverId === serverId).reduce((sum, c) => sum + (unreadChannels[c.id] || 0), 0)
   }
@@ -1977,6 +2774,25 @@ export default function Chat() {
     })
   }
 
+  const clearDmChat = (dm, mode) => {
+    setDmCtx(null)
+    setConfirmDialog({
+      title: mode === 'both' ? 'Очистить для всех' : 'Очистить у себя',
+      message: mode === 'both'
+        ? `Очистить историю переписки с ${dm.partner?.username} для обоих участников? Это действие нельзя отменить.`
+        : `Очистить историю переписки с ${dm.partner?.username} у себя?`,
+      confirmText: 'Очистить',
+      danger: true,
+      onConfirm: async () => {
+        try {
+          await API(`/api/dm-channels/${dm.id}/messages?mode=${mode}`, { method: 'DELETE' })
+          if (activeDM?.id === dm.id) setDmMessages([])
+        } catch {}
+        setConfirmDialog(null)
+      }
+    })
+  }
+
   const blockUser = async (userId, username) => {
     setDmCtx(null)
     setConfirmDialog({
@@ -1986,7 +2802,7 @@ export default function Chat() {
       danger: true,
       onConfirm: async () => {
         try {
-          const token = localStorage.getItem('token')
+          const token = localStorage.getItem('token') || sessionStorage.getItem('token')
           await fetch(`/api/users/${userId}/block`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token } })
           const res = await fetch('/api/blocked-users', { headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token } })
           const blocked = await res.json()
@@ -2013,7 +2829,9 @@ export default function Chat() {
     let fullUser = partnerUser
     try {
       const profile = await API(`/api/users/${partnerUser.id}/profile`)
-      fullUser = { ...partnerUser, ...profile }
+      // Use real-time status from members/friends state (updated via socket) instead of DB value
+      const liveUser = members.find(m => m.id === partnerUser.id) || friends.find(f => f.id === partnerUser.id)
+      fullUser = { ...partnerUser, ...profile, status: liveUser?.status ?? profile.status }
     } catch {}
     setUserProfilePopup({
       user: fullUser,
@@ -2032,6 +2850,7 @@ export default function Chat() {
       setFriendsTab('all')
       loadDmChannels()
       if (isMobile) setMobileInChat(true)
+      return dm
     } catch {}
   }
 
@@ -2325,6 +3144,39 @@ export default function Chat() {
     return false
   }, [activeServer, members, user.id])
 
+  // ── Central profile helpers ──
+  // Merge partial data into the profile store for one user
+  const patchProfile = useCallback((userId, fields) => {
+    if (!userId) return
+    setUserProfiles(prev => ({ ...prev, [userId]: { ...(prev[userId] || {}), id: userId, ...fields } }))
+  }, [])
+
+  // Seed profile store from an array of user objects
+  const seedProfiles = useCallback((users) => {
+    if (!users?.length) return
+    setUserProfiles(prev => {
+      const next = { ...prev }
+      users.forEach(u => { if (u?.id) next[u.id] = { ...(next[u.id] || {}), ...u } })
+      return next
+    })
+  }, [])
+
+  // Get profile for a user — live store takes priority over fallback snapshot
+  const prof = useCallback((id, fallback = {}) => {
+    const stored = userProfiles[id]
+    if (!stored) return fallback
+    return { ...fallback, ...stored }
+  }, [userProfiles])
+
+  // Returns custom role color for a user in the active server, or null
+  const getMemberRoleColor = useCallback((userId) => {
+    if (!activeServer) return null
+    const member = members.find(m => m.id === userId)
+    if (!member || !member.role || member.role === 'user' || member.role === 'admin') return null
+    const customRole = (activeServer.customRoles || []).find(r => r.id === member.role)
+    return customRole?.color || null
+  }, [activeServer, members])
+
   // ── Message context menu ──
   const handleMsgContext = (e, msg, isDM = false) => {
     if (msg.type === 'system') return
@@ -2428,10 +3280,33 @@ export default function Chat() {
     setMsgCtx(null)
   }
 
+  const saveMedia = async (url, filename) => {
+    setMsgCtx(null)
+    try {
+      const res = await fetch(url)
+      const blob = await res.blob()
+      const a = document.createElement('a')
+      a.href = URL.createObjectURL(blob)
+      a.download = filename || url.split('/').pop().split('?')[0] || 'file'
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000)
+    } catch {
+      window.open(url, '_blank')
+    }
+  }
+
   const startEditMsg = (msg) => {
     setEditingMsg({ id: msg.id, content: msg.content, isDM: msgCtx?.isDM })
     setMsgCtx(null)
-    setTimeout(() => editInputRef.current?.focus(), 50)
+    setTimeout(() => {
+      const el = editInputRef.current
+      if (!el) return
+      el.focus()
+      el.style.height = 'auto'
+      el.style.height = el.scrollHeight + 'px'
+    }, 50)
   }
 
   const saveEditMsg = async () => {
@@ -2459,9 +3334,60 @@ export default function Chat() {
   }), [])
 
   const insertEmoji = (emoji) => {
-    setInput(prev => (prev + emoji).slice(0, 200))
+    setInput(prev => (prev + emoji).slice(0, 1500))
+  }
+
+  const GIPHY_KEY = 'SyQTOSFtZxV42IbU7OK98OWqlBat4sA1'
+
+  const fetchGifs = useCallback(async (q) => {
+    setGifLoading(true)
+    try {
+      const url = q.trim()
+        ? `https://api.giphy.com/v1/gifs/search?api_key=${GIPHY_KEY}&q=${encodeURIComponent(q)}&limit=24&rating=g`
+        : `https://api.giphy.com/v1/gifs/trending?api_key=${GIPHY_KEY}&limit=24&rating=g`
+      const res = await fetch(url)
+      const data = await res.json()
+      setGifResults(data.data || [])
+    } catch { setGifResults([]) } finally { setGifLoading(false) }
+  }, [])
+
+  const openGifPicker = () => {
+    setShowGifPicker(v => {
+      if (!v) { setGifSearch(''); fetchGifs('') }
+      return !v
+    })
     setShowEmojiPicker(false)
-    setEmojiSearch('')
+  }
+
+  const fetchBannerGifs = useCallback(async (q) => {
+    setBannerGifLoading(true)
+    try {
+      const url = q.trim()
+        ? `https://api.giphy.com/v1/gifs/search?api_key=${GIPHY_KEY}&q=${encodeURIComponent(q)}&limit=24&rating=g`
+        : `https://api.giphy.com/v1/gifs/trending?api_key=${GIPHY_KEY}&limit=24&rating=g`
+      const res = await fetch(url)
+      const data = await res.json()
+      setBannerGifResults(data.data || [])
+    } catch { setBannerGifResults([]) } finally { setBannerGifLoading(false) }
+  }, [])
+
+  const selectBannerGif = (gif) => {
+    const url = gif.images.original.url
+    setProfileForm(f => ({ ...f, bannerImg: url }))
+    setShowBannerGifPicker(false)
+    setShowBannerOptions(false)
+  }
+
+  const sendGif = (gif) => {
+    const url = gif.images.fixed_height.url
+    if (showFriends && activeDM) {
+      socket.emit('send-dm', { dmChannelId: activeDM.id, content: url })
+    } else if (activeChannel) {
+      socket.emit('send-message', { channelId: activeChannel.id, content: url })
+    }
+    setShowGifPicker(false)
+    playSound('message-send')
+    setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 100)
   }
 
   useEffect(() => {
@@ -2475,6 +3401,17 @@ export default function Chat() {
     document.addEventListener('mousedown', close)
     return () => document.removeEventListener('mousedown', close)
   }, [showEmojiPicker])
+
+  useEffect(() => {
+    if (!showGifPicker) return
+    const close = (e) => {
+      if (gifPickerRef.current && !gifPickerRef.current.contains(e.target)) {
+        setShowGifPicker(false)
+      }
+    }
+    document.addEventListener('mousedown', close)
+    return () => document.removeEventListener('mousedown', close)
+  }, [showGifPicker])
 
   // Reactions
   const openReactionPicker = (e, msgId, isDM) => {
@@ -2732,7 +3669,7 @@ export default function Chat() {
   }
 
   const uploadFileAPI = async (file, sendAs) => {
-    const token = localStorage.getItem('token')
+    const token = localStorage.getItem('token') || sessionStorage.getItem('token')
     const fd = new FormData()
     fd.append('file', file)
     fd.append('sendAs', sendAs)
@@ -2840,7 +3777,7 @@ export default function Chat() {
 
   const formatTime = (iso) => {
     const d = new Date(iso)
-    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: timeFormat === '12' })
   }
 
   const formatDate = (iso) => {
@@ -2872,30 +3809,124 @@ export default function Chat() {
     <div className={`chat-app ${mobileNav ? 'mobile-nav-open' : ''} ${mobileInChat ? 'mobile-in-chat' : ''}`}>
       {/* Mobile overlay */}
       {mobileNav && <div className="mobile-overlay" onClick={() => setMobileNav(false)} />}
+      {/* Left sidebar (server + channel + user panel) */}
+      <div className="left-sidebar">
+      <div className="left-sidebar-panels">
       {/* Server sidebar */}
       <div className="server-bar">
         <div className="server-bar-inner">
           <button className={`server-icon friends-icon ${showFriends ? 'active' : ''}`} onClick={openFriends} title="Home">
-            <img src="/logo.png" alt="Branch" className="server-logo" />
+            <img src="/logo.png" alt="Буст" className="server-logo" />
             {(friendRequests.length + totalDMUnread) > 0 && <div className="friends-badge">{friendRequests.length + totalDMUnread}</div>}
           </button>
           <div className="server-divider" />
-          {servers.map(s => {
+          {effectiveLayout.map((item, idx) => {
+            if (item.type === 'folder') {
+              const folderServers = item.serverIds.map(id => servers.find(s => s.id === id)).filter(Boolean)
+              const folderUnread = folderServers.reduce((sum, s) => sum + getServerUnreadAll(s.id), 0)
+              const isExpanded = expandedFolders.has(item.folderId)
+              const isDragTarget = srvDropTarget?.action === 'add-to-folder' && srvDropTarget.folderId === item.folderId
+              const isDragging = srvDragState?.id === item.folderId
+              return (
+                <div key={item.folderId} className={`srv-folder-wrap ${isExpanded ? 'expanded' : ''}`}>
+                  <div
+                    ref={el => srvItemRefs.current[item.folderId] = el}
+                    data-item-type="folder"
+                    className={`server-icon srv-folder-icon ${isDragTarget ? 'drag-over' : ''} ${isDragging ? 'srv-dragging' : ''}`}
+                    style={{ cursor: 'pointer', background: `${item.color || appAccent}22`, border: `2px solid ${item.color || appAccent}55` }}
+                    onClick={() => setExpandedFolders(prev => {
+                      const n = new Set(prev)
+                      if (n.has(item.folderId)) n.delete(item.folderId)
+                      else n.add(item.folderId)
+                      return n
+                    })}
+                    onMouseDown={e => startSrvDrag(e, item.folderId)}
+                    onContextMenu={e => { e.preventDefault(); setFolderCtx({ x: e.clientX, y: e.clientY, folder: item }) }}
+                  >
+                    <div className="folder-mini-grid">
+                      {folderServers.slice(0, 4).map(s => (
+                        <div key={s.id} className="folder-mini-cell" style={{ background: s.avatarColor }}>
+                          {s.avatar ? <img src={s.avatar} className="folder-mini-img" alt="" /> : <span>{s.iconText}</span>}
+                        </div>
+                      ))}
+                    </div>
+                    <div className="folder-icon-overlay">
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill={item.color || appAccent}><path d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/></svg>
+                    </div>
+                    <div className="server-pill" />
+                    {folderUnread > 0 && <div className="server-badge">{folderUnread > 99 ? '99+' : folderUnread}</div>}
+                  </div>
+                  {isExpanded && (
+                    <div className="srv-folder-expanded">
+                      {folderServers.map(s => {
+                        const sUnread = getServerUnreadAll(s.id)
+                        const isFolderSrvDragging = srvDragState?.id === s.id
+                        return (
+                          <button
+                            key={s.id}
+                            ref={el => srvItemRefs.current[s.id] = el}
+                            data-item-type="server"
+                            data-verified={s.verified ? 'true' : 'false'}
+                            data-in-folder={item.folderId}
+                            className={`server-icon server-icon-sm ${activeServer?.id === s.id ? 'active' : ''} ${isFolderSrvDragging ? 'srv-dragging' : ''}`}
+                            onClick={() => { setActiveServer(s); setShowFriends(false); setActiveDM(null) }}
+                            onContextMenu={e => handleServerContext(e, s)}
+                            onMouseDown={e => startSrvDrag(e, s.id)}
+                            title={s.name}
+                          >
+                            {s.avatar ? <img src={s.avatar} alt={s.name} className="server-icon-avatar" /> : <span>{s.iconText}</span>}
+                            <div className="server-pill" />
+                            {s.verified && <div className="server-verified-badge"><svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M12 1l3.09 2.26L19 4l.74 3.91L22 11l-2.26 3.09L19 18l-3.91.74L12 21l-3.09-2.26L5 18l-.74-3.91L2 11l2.26-3.09L5 4l3.91-.74L12 1z" fill="#5865f2"/><path d="M8.5 12l2.5 2.5 5-5" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg></div>}
+                            {sUnread > 0 && <div className="server-badge">{sUnread > 99 ? '99+' : sUnread}</div>}
+                          </button>
+                        )
+                      })}
+                    </div>
+                  )}
+                </div>
+              )
+            }
+            // type === 'server'
+            const s = servers.find(x => x.id === item.id)
+            if (!s) return null
             const sUnread = getServerUnreadAll(s.id)
+            const isDragTarget = srvDropTarget?.action === 'merge' && srvDropTarget.targetServerId === s.id
+            const isDragging = srvDragState?.id === s.id
             return (
-            <button
-              key={s.id}
-              className={`server-icon ${activeServer?.id === s.id ? 'active' : ''}`}
-              onClick={() => { setActiveServer(s); setShowFriends(false); setActiveDM(null) }}
-              onContextMenu={(e) => handleServerContext(e, s)}
-              title={s.name}
-            >
-              <span>{s.iconText}</span>
-              <div className="server-pill" />
-              {s.verified && <div className="server-verified-badge"><svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M12 1l3.09 2.26L19 4l.74 3.91L22 11l-2.26 3.09L19 18l-3.91.74L12 21l-3.09-2.26L5 18l-.74-3.91L2 11l2.26-3.09L5 4l3.91-.74L12 1z" fill="#5865f2"/><path d="M8.5 12l2.5 2.5 5-5" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg></div>}
-              {sUnread > 0 && <div className="server-badge">{sUnread > 99 ? '99+' : sUnread}</div>}
-            </button>
-          )})}
+              <button
+                key={s.id}
+                ref={el => srvItemRefs.current[s.id] = el}
+                data-item-type="server"
+                data-verified={s.verified ? 'true' : 'false'}
+                className={`server-icon ${activeServer?.id === s.id ? 'active' : ''} ${isDragTarget ? 'drag-over' : ''} ${isDragging ? 'srv-dragging' : ''}`}
+                onClick={() => { setActiveServer(s); setShowFriends(false); setActiveDM(null) }}
+                onContextMenu={e => handleServerContext(e, s)}
+                onMouseDown={e => startSrvDrag(e, s.id)}
+                title={s.name}
+              >
+                {s.avatar ? <img src={s.avatar} alt={s.name} className="server-icon-avatar" /> : <span>{s.iconText}</span>}
+                <div className="server-pill" />
+                {s.verified && <div className="server-verified-badge"><svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M12 1l3.09 2.26L19 4l.74 3.91L22 11l-2.26 3.09L19 18l-3.91.74L12 21l-3.09-2.26L5 18l-.74-3.91L2 11l2.26-3.09L5 4l3.91-.74L12 1z" fill="#5865f2"/><path d="M8.5 12l2.5 2.5 5-5" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg></div>}
+                {(s.boostLevel > 0) && <div className="server-boost-badge" title={`Уровень ${s.boostLevel}`}>{'🔥'.repeat(s.boostLevel)}</div>}
+                {sUnread > 0 && <div className="server-badge">{sUnread > 99 ? '99+' : sUnread}</div>}
+              </button>
+            )
+          })}
+          {/* Reorder drop indicator line */}
+          {srvDragState && srvDropTarget?.action === 'reorder' && (() => {
+            const entries = Object.entries(srvItemRefs.current)
+              .map(([id, el]) => el ? { id, rect: el.getBoundingClientRect() } : null)
+              .filter(Boolean).sort((a, b) => a.rect.top - b.rect.top)
+            const insertAt = srvDropTarget.insertAt
+            let lineY
+            if (insertAt < entries.length) lineY = entries[insertAt].rect.top
+            else if (entries.length > 0) lineY = entries[entries.length - 1].rect.bottom
+            else return null
+            const barEl = entries[0]?.id && srvItemRefs.current[entries[0].id]?.closest('.server-bar')
+            if (!barEl) return null
+            const barRect = barEl.getBoundingClientRect()
+            return <div className="srv-drop-line-fixed" style={{ top: lineY - 1.5, left: barRect.left + 6, width: barRect.width - 12 }} />
+          })()}
           <button className="server-icon add-server" onClick={() => setShowCreateServer(true)} title="Create Server">
             <svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M10 4v12M4 10h12" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/></svg>
           </button>
@@ -2920,6 +3951,26 @@ export default function Chat() {
             <span>{t('channel.mute')}</span>
           </button>
           <div className="ctx-divider" />
+          {effectiveLayout.some(item => item.type === 'folder' && item.serverIds.includes(serverCtx.server.id)) && (
+            <button className="ctx-item" onClick={() => {
+              const origFolder = effectiveLayout.find(it => it.type === 'folder' && it.serverIds.includes(serverCtx.server.id))
+              const newLayout = effectiveLayout.map(item => {
+                if (item.type === 'folder' && item.serverIds.includes(serverCtx.server.id)) {
+                  const ids = item.serverIds.filter(id => id !== serverCtx.server.id)
+                  return ids.length > 0 ? { ...item, serverIds: ids } : null
+                }
+                return item
+              }).filter(Boolean)
+              const folderInNew = origFolder ? newLayout.findIndex(it => it.folderId === origFolder.folderId) : -1
+              const insertAt = folderInNew >= 0 ? folderInNew + 1 : newLayout.length
+              newLayout.splice(insertAt, 0, { type: 'server', id: serverCtx.server.id })
+              saveServerLayout(newLayout)
+              setServerCtx(null)
+            }}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></svg>
+              <span>Убрать из папки</span>
+            </button>
+          )}
           {serverCtx.server.ownerId === user.id && (
             <button className="ctx-item ctx-danger" onClick={() => deleteServer(serverCtx.server.id)}>
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
@@ -2939,9 +3990,111 @@ export default function Chat() {
         </div>
       )}
 
+      {/* Folder context menu */}
+      {folderCtx && (
+        <div className="ctx-overlay" onClick={() => setFolderCtx(null)}>
+          <div className="server-ctx-menu" ref={folderCtxRef} style={{ top: folderCtx.y, left: folderCtx.x }} onClick={e => e.stopPropagation()}>
+            <button className="ctx-item" onClick={() => {
+              const folderServerIds = new Set(folderCtx.folder.serverIds)
+              setUnreadChannels(prev => {
+                const n = { ...prev }
+                allChannels.filter(c => folderServerIds.has(c.serverId)).forEach(c => delete n[c.id])
+                return n
+              })
+              setFolderCtx(null)
+            }}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+              <span>Пометить как прочитанное</span>
+            </button>
+            <button className="ctx-item" onClick={() => {
+              setFolderSettings({ folder: folderCtx.folder })
+              setFolderSettingsName(folderCtx.folder.name)
+              setFolderSettingsColor(folderCtx.folder.color || appAccent)
+              setFolderCtx(null)
+            }}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93a10 10 0 010 14.14M4.93 4.93a10 10 0 000 14.14"/></svg>
+              <span>Настройки папки</span>
+            </button>
+            <div className="ctx-divider" />
+            <button className="ctx-item ctx-danger" onClick={() => {
+              const folder = folderCtx.folder
+              // Dissolve folder: extract all servers back to top level
+              const folderIdx = effectiveLayout.findIndex(it => it.folderId === folder.folderId)
+              const newLayout = effectiveLayout.filter(it => it.folderId !== folder.folderId)
+              const insertAt = folderIdx >= 0 ? folderIdx : newLayout.length
+              folder.serverIds.forEach((id, i) => newLayout.splice(insertAt + i, 0, { type: 'server', id }))
+              saveServerLayout(newLayout)
+              setFolderCtx(null)
+            }}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
+              <span>Удалить папку</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Folder settings modal */}
+      {folderSettings && (
+        <div className="modal-overlay" style={{ zIndex: 300 }} onClick={() => setFolderSettings(null)}>
+          <div className="modal" style={{ width: 360 }} onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>Настройки папки</h3>
+              <button className="modal-close" onClick={() => setFolderSettings(null)}>
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+              </button>
+            </div>
+            <div className="modal-body" style={{ display:'flex', flexDirection:'column', gap:16 }}>
+              {/* Name */}
+              <div className="field">
+                <label>Название папки</label>
+                <input
+                  className="input"
+                  value={folderSettingsName}
+                  onChange={e => setFolderSettingsName(e.target.value)}
+                  placeholder="Папка"
+                  maxLength={32}
+                />
+              </div>
+              {/* Color */}
+              <div className="field">
+                <label>Цвет папки</label>
+                <div className="banner-color-picker-row">
+                  <div className="banner-color-swatch"
+                       style={{ background: bannerGradient(folderSettingsColor) }}
+                       title="Изменить цвет"
+                       onClick={() => document.getElementById('folder-color-input').click()}>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.9)" strokeWidth="2" strokeLinecap="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+                    <input id="folder-color-input" type="color" value={folderSettingsColor || appAccent}
+                      style={{ position:'absolute', opacity:0, width:0, height:0, pointerEvents:'none' }}
+                      onChange={e => setFolderSettingsColor(e.target.value)} />
+                  </div>
+                  {folderSettingsColor && folderSettingsColor !== appAccent && (
+                    <button type="button" className="banner-color-clear" onClick={() => setFolderSettingsColor(appAccent)} title="Сбросить">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+            <div className="modal-actions">
+              <button className="btn-cancel" onClick={() => setFolderSettings(null)}>Отмена</button>
+              <button className="btn-submit" onClick={() => {
+                const newLayout = effectiveLayout.map(item =>
+                  item.type === 'folder' && item.folderId === folderSettings.folder.folderId
+                    ? { ...item, name: folderSettingsName || 'Папка', color: folderSettingsColor }
+                    : item
+                )
+                saveServerLayout(newLayout)
+                setFolderSettings(null)
+              }}>Сохранить</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* DM context menu */}
       {dmCtx && (
-        <div className="ctx-overlay" onClick={() => { setDmCtx(null); setDmMuteSub(false) }}>
+        <div className="ctx-overlay" onClick={() => { setDmCtx(null); setDmMuteSub(false); setDmDeleteSub(false); setDmClearSub(false) }}>
         <div className="dm-ctx-menu" ref={dmCtxRef} style={{ top: dmCtx.y, left: dmCtx.x }} onClick={e => e.stopPropagation()}>
           <button className="ctx-item" onClick={() => { showUserProfile(dmCtx.dm.partner, dmCtx.x, dmCtx.y) }}>
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
@@ -2978,14 +4131,44 @@ export default function Chat() {
             )}
           </div>
           <div className="ctx-divider" />
-          <button className="ctx-item" onClick={() => deleteDmChannel(dmCtx.dm, 'self')}>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
-            <span>{t('dm.deleteForSelf')}</span>
-          </button>
-          <button className="ctx-item ctx-danger" onClick={() => deleteDmChannel(dmCtx.dm, 'both')}>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
-            <span>{t('dm.deleteForAll')}</span>
-          </button>
+          <div className="ctx-item-wrap" onMouseEnter={() => { setDmClearSub(false); setDmDeleteSub(true) }} onMouseLeave={() => setDmDeleteSub(false)}>
+            <button type="button" className="ctx-item ctx-danger" onClick={() => setDmDeleteSub(prev => !prev)}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
+              <span>Удалить чат</span>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{marginLeft:'auto'}}><polyline points="9 18 15 12 9 6"/></svg>
+            </button>
+            {dmDeleteSub && (
+              <div className="channel-mute-submenu">
+                <button className="ctx-item" onClick={() => deleteDmChannel(dmCtx.dm, 'self')}>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+                  <span>У себя</span>
+                </button>
+                <button className="ctx-item ctx-danger" onClick={() => deleteDmChannel(dmCtx.dm, 'both')}>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>
+                  <span>У всех</span>
+                </button>
+              </div>
+            )}
+          </div>
+          <div className="ctx-item-wrap" onMouseEnter={() => { setDmDeleteSub(false); setDmClearSub(true) }} onMouseLeave={() => setDmClearSub(false)}>
+            <button type="button" className="ctx-item" onClick={() => setDmClearSub(prev => !prev)}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6"/><line x1="9" y1="11" x2="9" y2="17"/><line x1="15" y1="11" x2="15" y2="17"/></svg>
+              <span>Очистить чат</span>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{marginLeft:'auto'}}><polyline points="9 18 15 12 9 6"/></svg>
+            </button>
+            {dmClearSub && (
+              <div className="channel-mute-submenu">
+                <button className="ctx-item" onClick={() => clearDmChat(dmCtx.dm, 'self')}>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+                  <span>У себя</span>
+                </button>
+                <button className="ctx-item ctx-danger" onClick={() => clearDmChat(dmCtx.dm, 'both')}>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>
+                  <span>У всех</span>
+                </button>
+              </div>
+            )}
+          </div>
           <div className="ctx-divider" />
           {blockedUsers.includes(dmCtx.dm.partner?.id) ? (
             <button className="ctx-item" onClick={() => unblockUser(dmCtx.dm.partner?.id)}>
@@ -3005,12 +4188,17 @@ export default function Chat() {
       {/* User profile popup */}
       {userProfilePopup && (
         <div className="user-profile-card" ref={userProfileRef} style={{ top: userProfilePopup.y, left: userProfilePopup.x }}>
-          <div className="upc-banner" style={{ background: `linear-gradient(135deg, ${userProfilePopup.user?.avatarColor}, ${userProfilePopup.user?.avatarColor}88)` }} />
+          {(() => { const p = prof(userProfilePopup.user?.id, userProfilePopup.user); return (
+            <div className="upc-banner" style={p.bannerImg ? { backgroundImage:`url(${p.bannerImg})`, backgroundSize:'cover', backgroundPosition:'center' } : { background: bannerGradient(p.bannerColor || p.avatarColor) }} />
+          )})()}
           <div className="upc-avatar-row">
-            <div className="upc-avatar" style={{ background: userProfilePopup.user?.avatarColor }}>
-              {userProfilePopup.user?.username?.[0]?.toUpperCase()}
-            </div>
-            <div className={`upc-status-dot ${userProfilePopup.user?.status || 'offline'}`} />
+            {(() => { const p = prof(userProfilePopup.user?.id, userProfilePopup.user); return (
+              <div className={`upc-avatar${p.avatarFrame ? ` avatar-frame-${p.avatarFrame}` : ''}`} style={{ background: p.avatarColor }}>
+                <AImg src={p.avatar} />
+                {p.username?.[0]?.toUpperCase()}
+              </div>
+            )})()}
+            <div className={`upc-status-dot ${prof(userProfilePopup.user?.id, userProfilePopup.user).status || 'offline'}`} />
           </div>
           <div className="upc-body">
             <div className={`upc-name copyable-name ${streamerMode && userProfilePopup.user?.id === user.id ? 'streamer-blur' : ''}`} onClick={(e) => copyUsername(userProfilePopup.user?.username, userProfilePopup.user?.tag, e)} title={copiedName ? t('profile.copied') : t('profile.clickToCopy')}>{userProfilePopup.user?.username}<span className="user-tag">#{userProfilePopup.user?.tag}</span></div>
@@ -3118,9 +4306,9 @@ export default function Chat() {
                 <span>{t('nav.friends')}</span>
                 {(friendRequests.length + outgoingRequests.length) > 0 && <span className="nav-badge pending">{friendRequests.length + outgoingRequests.length}</span>}
               </button>
-              <button className="dm-nav-item dm-nav-store" disabled>
+              <button className={`dm-nav-item dm-nav-store ${showShop ? 'active' : ''}`} onClick={() => showShop ? setShowShop(false) : openShop()}>
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M6 2L3 7v11a2 2 0 002 2h14a2 2 0 002-2V7l-3-5z"/><line x1="3" y1="7" x2="21" y2="7"/><path d="M16 11a4 4 0 01-8 0"/></svg>
-                <span>{t('common.store')}</span>
+                <span>Магазин</span>
               </button>
               {dmSearchResults ? (
                 <>
@@ -3169,8 +4357,11 @@ export default function Chat() {
                             }
                           }}
                         >
-                          <div className="dm-item-avatar" style={{ background: r.partner.avatarColor }}>
-                            {r.partner.username[0].toUpperCase()}
+                          <div className="dm-item-avatar-wrap">
+                            <div className="dm-item-avatar" style={{ background: r.partner.avatarColor }}>
+                              <AImg src={r.partner.avatar} />
+                              {r.partner.username[0].toUpperCase()}
+                            </div>
                             <div className={`status-dot ${r.partner.status || 'offline'}`} />
                           </div>
                           <div className="dm-item-info">
@@ -3219,8 +4410,11 @@ export default function Chat() {
                   onClick={() => { setActiveDM(dm); setSelectMode(false); setSelectedMsgs(new Set()); setMobileNav(false); if (isMobile) setMobileInChat(true) }}
                   onContextMenu={(e) => handleDmContext(e, dm)}
                 >
-                  <div className="dm-item-avatar" style={{ background: dm.partner?.avatarColor }}>
-                    {dm.partner?.username?.[0]?.toUpperCase()}
+                  <div className="dm-item-avatar-wrap">
+                    <div className="dm-item-avatar" style={{ background: dm.partner?.avatarColor }}>
+                      <AImg src={dm.partner?.avatar} />
+                      {dm.partner?.username?.[0]?.toUpperCase()}
+                    </div>
                     <div className={`status-dot ${dm.partner?.status || 'offline'}`} />
                   </div>
                   <div className="dm-item-info">
@@ -3362,6 +4556,7 @@ export default function Chat() {
                         {vcUsers.map(vu => (
                           <div key={vu.id} className="voice-user-item" onContextMenu={e => { if (vu.id !== user.id) { e.preventDefault(); setVoiceUserCtx({ user: vu, x: e.clientX, y: e.clientY }) } }}>
                             <div className={`voice-user-avatar ${speakingUsers.has(vu.id) ? 'speaking' : ''}`} style={{ background: vu.avatarColor }}>
+                              <AImg src={vu.avatar} />
                               {vu.username[0].toUpperCase()}
                             </div>
                             <span className="voice-user-name">{vu.username}</span>
@@ -3425,14 +4620,17 @@ export default function Chat() {
             )}
           </>
         ) : null}
-        {(showFriends || activeServer) && (
+        {false && (
             <div className="user-panel-wrapper" ref={userPopupRef}>
               {showUserMenu && (
                 <div className="user-popup">
-                  <div className="popup-banner" style={{ background: user.avatarColor }} />
-                  <div className="popup-avatar" style={{ background: user.avatarColor }}>
-                    {user.username[0].toUpperCase()}
-                    <div className={`status-dot ${user.status || 'online'}`} />
+                  <div className="popup-banner" style={{ background: bannerGradient(user.bannerColor || user.avatarColor) }} />
+                  <div className="popup-avatar-wrap">
+                    <div className="popup-avatar" style={{ background: user.avatarColor }}>
+                      <AImg src={user.avatar} />
+                      {user.username[0].toUpperCase()}
+                    </div>
+                    <div className={`status-dot ${user.status || 'offline'}`} />
                   </div>
                   <div className="popup-info">
                     <div className={`popup-name copyable-name ${streamerMode ? 'streamer-blur' : ''}`} onClick={(e) => copyUsername(user.username, user.tag, e)} title={copiedName ? t('profile.copied') : t('profile.clickToCopy')}>{user.username}<span className="user-tag">#{user.tag}</span></div>
@@ -3481,9 +4679,12 @@ export default function Chat() {
               )}
               <div className="user-panel">
                 <div className="user-panel-info" onClick={() => setShowUserMenu(!showUserMenu)}>
-                  <div className="user-avatar-sm" style={{ background: user.avatarColor }}>
-                    {user.username[0].toUpperCase()}
-                    <div className={`status-dot ${user.status || 'online'}`} />
+                  <div className="user-avatar-sm-wrap">
+                    <div className="user-avatar-sm" style={{ background: user.avatarColor }}>
+                      <AImg src={user.avatar} />
+                      {user.username[0].toUpperCase()}
+                    </div>
+                    <div className={`status-dot ${user.status || 'offline'}`} />
                   </div>
                   <div className="user-panel-text">
                     <span className={`user-panel-name ${streamerMode ? 'streamer-blur' : ''}`}>{user.username}<span className="user-tag">#{user.tag}</span></span>
@@ -3497,6 +4698,79 @@ export default function Chat() {
             </div>
         )}
       </div>
+      </div>{/* /left-sidebar-panels */}
+
+      {/* Global user panel spanning full left sidebar width */}
+      {(showFriends || activeServer) && (
+        <div className="user-panel-wrapper global-user-panel" ref={userPopupRef}>
+          {showUserMenu && (
+            <div className="user-popup user-popup-global">
+              <div className="popup-banner" style={user.bannerImg ? { backgroundImage:`url(${user.bannerImg})`, backgroundSize:'cover', backgroundPosition:'center' } : { background: bannerGradient(user.bannerColor || user.avatarColor) }} />
+              <div className="popup-avatar-wrap">
+                <div className={`popup-avatar${user.avatarFrame ? ` avatar-frame-${user.avatarFrame}` : ''}`} style={{ background: user.avatarColor }}>
+                  <AImg src={user.avatar} />
+                  {user.username[0].toUpperCase()}
+                </div>
+                <div className={`status-dot ${user.status || 'offline'}`} />
+              </div>
+              <div className="popup-info">
+                <div className={`popup-name copyable-name ${streamerMode ? 'streamer-blur' : ''}`} onClick={(e) => copyUsername(user.username, user.tag, e)} title={copiedName ? t('profile.copied') : t('profile.clickToCopy')}>{user.username}<span className="user-tag">#{user.tag}</span></div>
+                <div className="popup-email" onClick={() => { if (!emailRevealed) { setEmailRevealed(true); setTimeout(() => setEmailRevealed(false), 3000) } }} title={streamerMode ? t('profile.emailHidden') : (emailRevealed ? user.email : t('profile.emailReveal'))}>
+                  {streamerMode ? <span className="streamer-blur">{user.email}</span> : (<>{emailRevealed ? user.email : <><span className="email-blurred">{user.email.split('@')[0]}</span>@{user.email.split('@')[1]}</>}</>)}
+                </div>
+                {user.bio && <div className="popup-bio">{user.bio}</div>}
+              </div>
+              <div className="popup-divider" />
+              <div className="popup-section-label">{t('status.label')}</div>
+              {[
+                { value: 'online', key: 'status.online', color: '#00d4aa' },
+                { value: 'idle', key: 'status.idle', color: '#f0b232' },
+                { value: 'dnd', key: 'status.dnd', color: '#f04747' },
+                { value: 'invisible', key: 'status.invisible', color: '#55556a' },
+              ].map(opt => (
+                <button key={opt.value} className={`popup-status-item ${user.status === opt.value ? 'active' : ''}`} onClick={() => changeStatus(opt.value)}>
+                  <div className="popup-status-dot" style={{ background: opt.color }} />
+                  <span>{t(opt.key)}</span>
+                  {user.status === opt.value && <svg className="popup-check" width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M3 8l3.5 3.5L13 5" stroke="var(--primary)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>}
+                </button>
+              ))}
+              <div className="popup-divider" />
+              <button className="popup-action" onClick={() => { const next = !streamerMode; setStreamerMode(next); localStorage.setItem('streamerMode', next) }}>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>{streamerMode && <line x1="1" y1="1" x2="23" y2="23"/>}</svg>
+                {t('settings.streamerMode')}{streamerMode ? ` — ${t('settings.streamerOn')}` : ''}
+                <div className={`streamer-indicator ${streamerMode ? 'active' : ''}`} />
+              </button>
+              <button className="popup-action" onClick={openProfileSettings}>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+                {t('settings.profileSettings')}
+              </button>
+              <button className="popup-action popup-action-danger" onClick={logout}>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4M16 17l5-5-5-5M21 12H9"/></svg>
+                {t('settings.logout')}
+              </button>
+            </div>
+          )}
+          <div className="user-panel user-panel-global">
+            <div className="user-panel-info" onClick={() => setShowUserMenu(!showUserMenu)}>
+              <div className="user-avatar-sm-wrap">
+                <div className={`user-avatar-sm${user.avatarFrame ? ` avatar-frame-${user.avatarFrame}` : ''}`} style={{ background: user.avatarColor }}>
+                  <AImg src={user.avatar} />
+                  {user.username[0].toUpperCase()}
+                </div>
+                <div className={`status-dot ${user.status || 'offline'}`} />
+              </div>
+              <div className="user-panel-text">
+                <span className={`user-panel-name ${streamerMode ? 'streamer-blur' : ''}`}>{user.username}<span className="user-tag">#{user.tag}</span></span>
+                <span className="user-panel-status">{statusLabel(user.status)}</span>
+              </div>
+            </div>
+            <button className="user-panel-btn" onClick={openProfileSettings} title="Settings">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+            </button>
+          </div>
+        </div>
+      )}
+      </div>{/* /left-sidebar */}
 
       {/* Chat area */}
       <div className="chat-area">
@@ -3507,11 +4781,137 @@ export default function Chat() {
                 <button className="mobile-back-btn" onClick={() => { setMobileInChat(false); setActiveDM(null) }}><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 18 9 12 15 6"/></svg></button>
                 <button className="mobile-hamburger" onClick={() => setMobileNav(true)}><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg></button>
                 <div className="dm-header-avatar" style={{ background: activeDM.partner?.avatarColor }}>
+                  <AImg src={activeDM.partner?.avatar} />
                   {activeDM.partner?.username?.[0]?.toUpperCase()}
                 </div>
                 <h3>{activeDM.partner?.username}</h3>
               </div>
+              <div className="chat-header-right">
+                {dmCall && dmCall.dmChannelId === activeDM.id ? (
+                  <button className="dm-call-header-btn dm-call-end-btn" onClick={endDmCall} title="Завершить звонок">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 9c-1.6 0-3.15.25-4.6.72v3.1c0 .39-.23.74-.56.9-.98.49-1.87 1.12-2.66 1.85-.18.18-.43.28-.7.28-.28 0-.53-.11-.71-.29L.29 13.08a.956.956 0 010-1.36C3.09 8.98 7.27 7 12 7s8.91 1.98 11.71 4.72c.18.18.29.44.29.71 0 .28-.11.53-.29.71l-2.48 2.48c-.18.18-.43.29-.71.29-.27 0-.52-.11-.7-.28a11.27 11.27 0 00-2.67-1.85.996.996 0 01-.56-.9v-3.1C15.15 9.25 13.6 9 12 9z"/></svg>
+                  </button>
+                ) : (
+                  <button className="dm-call-header-btn" onClick={() => startDmCall(activeDM.id, activeDM.partner)} title="Позвонить">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07 19.5 19.5 0 01-6-6 19.79 19.79 0 01-3.07-8.67A2 2 0 014.11 2h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L8.09 9.91a16 16 0 006 6l1.27-1.27a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0122 16.92z"/></svg>
+                  </button>
+                )}
+              </div>
             </div>
+            {/* DM Call — Discord style */}
+            {dmCall && dmCall.dmChannelId === activeDM.id && (
+              dmCall.status === 'calling' ? (
+                <div className="dm-call-panel">
+                  <div className="dm-call-video-area">
+                    <div className="dm-call-circles">
+                      <div className="dm-call-circle-wrap">
+                        <div className="dm-call-circle-ring pulsing-ring">
+                          <div className="dm-call-big-avatar" style={{ background: dmCall.partnerAvatarColor }}>
+                            <AImg src={dmCall.partnerAvatar} />
+                            {dmCall.partnerUsername?.[0]?.toUpperCase()}
+                          </div>
+                        </div>
+                        <span className="dm-call-circle-name">{dmCall.partnerUsername}</span>
+                        <span className="dm-call-circle-sub">Вызов...</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="dm-call-bar">
+                    <button type="button" className="vc-ctrl-btn hangup" onClick={endDmCall} title="Отменить вызов">
+                      <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 9c-1.6 0-3.15.25-4.6.72v3.1c0 .39-.23.74-.56.9-.98.49-1.87 1.12-2.66 1.85-.18.18-.43.28-.7.28-.28 0-.53-.11-.71-.29L.29 13.08a.956.956 0 010-1.36C3.09 8.98 7.27 7 12 7s8.91 1.98 11.71 4.72c.18.18.29.44.29.71 0 .28-.11.53-.29.71l-2.48 2.48c-.18.18-.43.29-.71.29-.27 0-.52-.11-.7-.28a11.27 11.27 0 00-2.67-1.85.996.996 0 01-.56-.9v-3.1C15.15 9.25 13.6 9 12 9z"/></svg>
+                    </button>
+                  </div>
+                </div>
+              ) : (() => {
+                const dmPeerSid = Object.keys(peerConnections.current).find(sid => peerConnections.current[sid] === dmCallPeerConnection.current)
+                const hasLocalCam = dmCallCameraOn && dmCallCameraStream.current
+                const hasLocalScreen = dmCallScreenOn && dmCallScreenStream.current
+                const hasRemoteVid = dmPeerSid && remoteVideoStreams[dmPeerSid]
+                const hasRemoteScreen = dmPeerSid && remoteScreenStreams[dmPeerSid]
+                const anyVideo = hasLocalCam || hasLocalScreen || hasRemoteVid || hasRemoteScreen
+                return (
+                <div className={`dm-call-panel${anyVideo ? ' has-video' : ''}`}>
+                  {/* Video area */}
+                  <div className="dm-call-video-area">
+                    {(() => {
+                      if (anyVideo) {
+                        return (
+                          <div className="dm-call-tiles">
+                            <div className={`dm-call-tile ${speakingUsers.has(dmCall.partnerId) ? 'speaking' : ''}`}>
+                              {hasRemoteScreen ? (
+                                <video ref={el => { if (el) { const s = remoteScreenStreams[dmPeerSid]; if (s && el.srcObject !== s) el.srcObject = s } }} autoPlay playsInline className="dm-tile-video" />
+                              ) : hasRemoteVid ? (
+                                <video ref={el => { if (el) { const s = remoteVideoStreams[dmPeerSid]; if (s && el.srcObject !== s) el.srcObject = s } }} autoPlay playsInline className="dm-tile-video" />
+                              ) : (
+                                <div className="dm-tile-avatar" style={{ background: dmCall.partnerAvatarColor }}><AImg src={dmCall.partnerAvatar} />{dmCall.partnerUsername?.[0]?.toUpperCase()}</div>
+                              )}
+                              <div className="dm-tile-name">{dmCall.partnerUsername}</div>
+                            </div>
+                            <div className={`dm-call-tile ${speakingUsers.has(user.id) ? 'speaking' : ''}`}>
+                              {hasLocalScreen ? (
+                                <video ref={el => { if (el) { const s = dmCallScreenStream.current; if (s && el.srcObject !== s) el.srcObject = s } }} autoPlay muted playsInline className="dm-tile-video" />
+                              ) : hasLocalCam ? (
+                                <video ref={el => { if (el) { const s = dmCallCameraStream.current; if (s && el.srcObject !== s) el.srcObject = s } }} autoPlay muted playsInline className="dm-tile-video mirror" />
+                              ) : (
+                                <div className="dm-tile-avatar" style={{ background: user.avatarColor }}><AImg src={user.avatar} />{user.username?.[0]?.toUpperCase()}</div>
+                              )}
+                              <div className="dm-tile-name">{user.username}</div>
+                              {dmCallMuted.current && <div className="dm-tile-mute"><svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="white" strokeWidth="1.5" strokeLinecap="round"><rect x="5" y="1" width="6" height="9" rx="3"/><path d="M3 7v1a5 5 0 0010 0V7"/><line x1="8" y1="13" x2="8" y2="15"/><line x1="13" y1="2" x2="3" y2="14"/></svg></div>}
+                            </div>
+                          </div>
+                        )
+                      }
+                      return (
+                        <div className="dm-call-circles">
+                          <div className="dm-call-circle-wrap">
+                            <div className={`dm-call-circle-ring ${speakingUsers.has(dmCall.partnerId) ? 'speaking' : ''}`}>
+                              <div className="dm-call-big-avatar" style={{ background: dmCall.partnerAvatarColor }}><AImg src={dmCall.partnerAvatar} />{dmCall.partnerUsername?.[0]?.toUpperCase()}</div>
+                            </div>
+                            <span className="dm-call-circle-name">{dmCall.partnerUsername}</span>
+                          </div>
+                          <div className="dm-call-circle-wrap">
+                            <div className={`dm-call-circle-ring ${speakingUsers.has(user.id) ? 'speaking' : ''}`}>
+                              <div className="dm-call-big-avatar" style={{ background: user.avatarColor }}><AImg src={user.avatar} />{user.username?.[0]?.toUpperCase()}</div>
+                              {dmCallMuted.current && <div className="dm-call-mute-badge"><svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="white" strokeWidth="1.5" strokeLinecap="round"><rect x="5" y="1" width="6" height="9" rx="3"/><path d="M3 7v1a5 5 0 0010 0V7"/><line x1="8" y1="13" x2="8" y2="15"/><line x1="13" y1="2" x2="3" y2="14"/></svg></div>}
+                            </div>
+                            <span className="dm-call-circle-name">{user.username}</span>
+                          </div>
+                        </div>
+                      )
+                    })()}
+                  </div>
+                  {/* Timer */}
+                  <div className="dm-call-timer-bar">
+                    <span className="dm-call-duration">{Math.floor(dmCallDuration / 60).toString().padStart(2, '0')}:{(dmCallDuration % 60).toString().padStart(2, '0')}</span>
+                  </div>
+                  {/* Controls */}
+                  <div className="dm-call-bar">
+                    <button type="button" className={`vc-ctrl-btn${dmCallMuted.current ? ' muted' : ''}`} onClick={toggleDmCallMute} title={dmCallMuted.current ? 'Включить микрофон' : 'Выключить микрофон'}>
+                      {dmCallMuted.current
+                        ? <svg width="20" height="20" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><rect x="5" y="1" width="6" height="9" rx="3"/><path d="M3 7v1a5 5 0 0010 0V7"/><line x1="8" y1="13" x2="8" y2="15"/><line x1="13" y1="2" x2="3" y2="14"/></svg>
+                        : <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/><path d="M19 10v2a7 7 0 01-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>}
+                    </button>
+                    <button type="button" className={`vc-ctrl-btn${dmCallDeafened ? ' muted' : ''}`} onClick={toggleDmCallDeafen} title={dmCallDeafened ? 'Включить звук' : 'Заглушить звук'}>
+                      {dmCallDeafened
+                        ? <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M3 14h3a2 2 0 012 2v3a2 2 0 01-2 2H5a2 2 0 01-2-2v-7a9 9 0 0118 0v7a2 2 0 01-2 2h-1a2 2 0 01-2-2v-3a2 2 0 012-2h3"/><line x1="21" y1="3" x2="3" y2="21"/></svg>
+                        : <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M3 18v-6a9 9 0 0118 0v6"/><path d="M21 19a2 2 0 01-2 2h-1a2 2 0 01-2-2v-3a2 2 0 012-2h3zM3 19a2 2 0 002 2h1a2 2 0 002-2v-3a2 2 0 00-2-2H3z"/></svg>}
+                    </button>
+                    <button type="button" className={`vc-ctrl-btn${dmCallCameraOn ? ' cam-on' : ''}`} onClick={toggleDmCallCamera} title={dmCallCameraOn ? 'Выключить камеру' : 'Включить камеру'}>
+                      {dmCallCameraOn
+                        ? <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>
+                        : <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M16 16v1a2 2 0 01-2 2H3a2 2 0 01-2-2V7a2 2 0 012-2h2m5.66 0H14a2 2 0 012 2v3.34l1 1L23 7v10"/><line x1="1" y1="1" x2="23" y2="23"/></svg>}
+                    </button>
+                    <button type="button" className={`vc-ctrl-btn${dmCallScreenOn ? ' cam-on' : ''}`} onClick={toggleDmCallScreen} title={dmCallScreenOn ? 'Остановить демонстрацию' : 'Демонстрация экрана'}>
+                      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+                    </button>
+                    <button type="button" className="vc-ctrl-btn hangup" onClick={endDmCall} title="Завершить звонок">
+                      <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 9c-1.6 0-3.15.25-4.6.72v3.1c0 .39-.23.74-.56.9-.98.49-1.87 1.12-2.66 1.85-.18.18-.43.28-.7.28-.28 0-.53-.11-.71-.29L.29 13.08a.956.956 0 010-1.36C3.09 8.98 7.27 7 12 7s8.91 1.98 11.71 4.72c.18.18.29.44.29.71 0 .28-.11.53-.29.71l-2.48 2.48c-.18.18-.43.29-.71.29-.27 0-.52-.11-.7-.28a11.27 11.27 0 00-2.67-1.85.996.996 0 01-.56-.9v-3.1C15.15 9.25 13.6 9 12 9z"/></svg>
+                    </button>
+                  </div>
+                </div>
+                )
+              })()
+            )}
             {dmPinnedMessages.length > 0 && (
               <div className="pinned-bar" onClick={() => scrollToDmPinned(dmPinnedIndex)}>
                 <svg className="pinned-bar-icon" width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z"/></svg>
@@ -3554,35 +4954,40 @@ export default function Chat() {
                         </div>
                       )}
                       {isMsgPinned(msg, true) && !msg.deleted && <div className="msg-pin-indicator"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z"/></svg></div>}
-                      {!isGrouped && !selectMode && (
-                        <div className="msg-avatar clickable" style={{ background: msg.user?.avatarColor }} onClick={(e) => msg.user && showUserProfile(msg.user, e.clientX, e.clientY)}>
-                          {msg.user?.username?.[0]?.toUpperCase()}
+                      {!isGrouped && !selectMode && (() => { const p = prof(msg.userId, msg.user); return (
+                        <div className={`msg-avatar clickable${p.avatarFrame ? ` avatar-frame-${p.avatarFrame}` : ''}`} style={{ background: p.avatarColor }} onClick={(e) => msg.user && showUserProfile({ ...msg.user, ...userProfiles[msg.userId] }, e.clientX, e.clientY)}>
+                          <AImg src={p.avatar} />
+                          {p.username?.[0]?.toUpperCase()}
                         </div>
-                      )}
+                      )})()}
                       <div className="msg-content">
                         {msg.replyTo && (
                           <div className="msg-reply-ref" onClick={() => { const el = document.getElementById('msg-' + msg.replyTo.id); if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); el.classList.remove('msg-highlight'); void el.offsetWidth; el.classList.add('msg-highlight'); setTimeout(() => el.classList.remove('msg-highlight'), 2000) } }}>
-                            <div className="msg-reply-line" style={{ background: msg.replyTo.user?.avatarColor || 'var(--primary)' }} />
-                            <span className="msg-reply-author" style={{ color: msg.replyTo.user?.avatarColor }}>{msg.replyTo.user?.username || t('msg.deletedUser')}</span>
+                            <div className="msg-reply-line" style={{ background: getMemberRoleColor(msg.replyTo.user?.id) || msg.replyTo.user?.avatarColor || 'var(--primary)' }} />
+                            <span className="msg-reply-author" style={{ color: getMemberRoleColor(msg.replyTo.user?.id) || undefined }}>{msg.replyTo.user?.username || t('msg.deletedUser')}</span>
                             <span className="msg-reply-text">{msg.replyTo.content || t('msg.replyContent')}</span>
                           </div>
                         )}
-                        {!isGrouped && (
+                        {!isGrouped && (() => { const p = prof(msg.userId, msg.user); return (
                           <div className="msg-header">
-                            <span className={`msg-author clickable ${streamerMode && msg.userId === user.id ? 'streamer-blur' : ''}`} style={{ color: msg.user?.avatarColor }} onClick={(e) => msg.user && showUserProfile(msg.user, e.clientX, e.clientY)}><span className="msg-author-name">{msg.user?.username}</span><span className="user-tag">#{msg.user?.tag}</span></span>
+                            <span className={`msg-author clickable ${streamerMode && msg.userId === user.id ? 'streamer-blur' : ''}`} style={{ color: getMemberRoleColor(msg.userId) || undefined }} onClick={(e) => showUserProfile({ ...msg.user, ...userProfiles[msg.userId] }, e.clientX, e.clientY)}><span className="msg-author-name">{p.username}</span><span className="user-tag">#{p.tag}</span>{p.statusEmoji && <span className="msg-status-emoji" title="Статус">{p.statusEmoji}</span>}</span>
                             <span className="msg-time">{formatTime(msg.createdAt)}</span>
                           </div>
-                        )}
+                        )})()}
                         {msg.deleted ? (
                           <div className="msg-text message-deleted">{t('msg.deleted')}</div>
                         ) : editingMsg && editingMsg.id === msg.id ? (
                           <div className="msg-edit-wrap">
-                            <input ref={editInputRef} className="msg-edit-input" value={editingMsg.content} onChange={e => setEditingMsg(prev => ({ ...prev, content: e.target.value }))} onKeyDown={e => { if (e.key === 'Enter') saveEditMsg(); if (e.key === 'Escape') cancelEdit() }} />
+                            <textarea ref={editInputRef} className="msg-edit-input" value={editingMsg.content} maxLength={1500} rows={1} onChange={e => { setEditingMsg(prev => ({ ...prev, content: e.target.value.slice(0, 1500) })); e.target.style.height = 'auto'; e.target.style.height = e.target.scrollHeight + 'px'; }} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); saveEditMsg(); } if (e.key === 'Escape') cancelEdit(); }} />
                             <div className="msg-edit-hint">{t('msg.edited')}</div>
                           </div>
                         ) : (
                           <>
-                            {msg.content && <div className="msg-text">{msg.content}{msg.editedAt && <span className="msg-edited">{t('msg.edited')}</span>}</div>}
+                            {msg.content && !['dm-call-start','dm-call-end','dm-call-missed'].includes(msg.type) && (
+                              /^https:\/\/media\d*\.giphy\.com\//i.test(msg.content)
+                                ? <div className="msg-gif"><img src={msg.content} alt="GIF" className="msg-gif-img" loading="lazy" /></div>
+                                : <div className={`msg-text${emojiOnlyCount(msg.content) ? " msg-big-emoji" : ""}`}>{renderContent(msg.content, serverCustomEmojis)}{msg.editedAt && <span className="msg-edited">{t('msg.edited')}</span>}</div>
+                            )}
                           </>
                         )}
                         {msg.type === 'invite' && msg.invite && (
@@ -3623,6 +5028,19 @@ export default function Chat() {
                               ) : (
                                 <button className="btn-submit invite-card-btn" onClick={() => joinVoiceFromInvite(msg.voiceInvite.serverId, msg.voiceInvite.channelId, msg.voiceInvite.channelName)}>{t('voice.joinChannel')}</button>
                               )}
+                            </div>
+                          </div>
+                        )}
+                        {(msg.type === 'dm-call-start' || msg.type === 'dm-call-end' || msg.type === 'dm-call-missed') && (
+                          <div className="dm-call-system-msg">
+                            <div className="dm-call-system-icon">
+                              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={msg.type === 'dm-call-missed' ? 'var(--danger)' : 'var(--secondary)'} strokeWidth="2" strokeLinecap="round"><path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07 19.5 19.5 0 01-6-6 19.79 19.79 0 01-3.07-8.67A2 2 0 014.11 2h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L8.09 9.91a16 16 0 006 6l1.27-1.27a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0122 16.92z"/>{msg.type === 'dm-call-missed' && <line x1="1" y1="1" x2="23" y2="23"/>}</svg>
+                            </div>
+                            <div className="dm-call-system-text">
+                              <span className="dm-call-system-title">
+                                {msg.type === 'dm-call-start' ? `${msg.user?.username} начал звонок` : msg.type === 'dm-call-missed' ? 'Пропущенный звонок' : `Звонок завершён`}
+                              </span>
+                              {msg.type === 'dm-call-end' && msg.content && <span className="dm-call-system-duration">{msg.content}</span>}
                             </div>
                           </div>
                         )}
@@ -3702,9 +5120,9 @@ export default function Chat() {
               <form className="chat-input-form" onSubmit={sendDM} style={selectMode ? { display: 'none' } : undefined}>
                 {replyTo && replyTo.isDM && (
                   <div className="reply-bar">
-                    <div className="reply-bar-line" style={{ background: replyTo.user?.avatarColor || 'var(--primary)' }} />
+                    <div className="reply-bar-line" style={{ background: 'var(--primary)' }} />
                     <div className="reply-bar-content">
-                      <span className="reply-bar-label">{t('message.reply')} <span className="reply-bar-author" style={{ color: replyTo.user?.avatarColor }}>{replyTo.user?.username}</span></span>
+                      <span className="reply-bar-label">{t('message.reply')} <span className="reply-bar-author">{replyTo.user?.username}</span></span>
                       <span className="reply-bar-text">{replyTo.content || t('message.attachment')}</span>
                     </div>
                     <button type="button" className="reply-bar-close" onClick={() => setReplyTo(null)}>
@@ -3735,15 +5153,17 @@ export default function Chat() {
                       </div>
                     )}
                   </div>
-                  <input
-                    type="text"
+                  <textarea
+                    className="chat-textarea"
                     placeholder={t('dm.writeToPlaceholder').replace('{name}', activeDM.partner?.username)}
                     value={input}
-                    onChange={e => setInput(e.target.value)}
-                    maxLength={200}
+                    onChange={e => { setInput(e.target.value.slice(0, 1500)); e.target.style.height='auto'; e.target.style.height=Math.min(e.target.scrollHeight,160)+'px' }}
+                    onKeyDown={e => handleChatKeyDown(e, sendDM)}
+                    maxLength={1500}
+                    rows={1}
                     autoFocus
                   />
-                  {input.length > 150 && <span className="char-counter" style={{ color: input.length >= 200 ? 'var(--danger)' : 'var(--text-muted)' }}>{input.length}/200</span>}
+                  {input.length > 1300 && <span className="char-counter" style={{ color: input.length >= 1500 ? 'var(--danger)' : 'var(--text-muted)' }}>{input.length}/1500</span>}
                   <div className="emoji-btn-wrapper">
                     <button type="button" className="input-btn emoji-toggle-btn" onClick={() => { setShowEmojiPicker(v => !v); setEmojiSearch(''); setEmojiCategory('smileys') }} title={t('emoji.title') || 'Эмодзи'}>
                       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/></svg>
@@ -3753,6 +5173,19 @@ export default function Chat() {
                         <div className="emoji-picker-search">
                           <input type="text" placeholder={t('emoji.search') || 'Поиск...'} value={emojiSearch} onChange={e => setEmojiSearch(e.target.value)} autoFocus />
                         </div>
+                        {serverCustomEmojis.length > 0 && !emojiSearch && (
+                          <>
+                            <div className="emoji-picker-section-label">Эмодзи сервера</div>
+                            <div className="emoji-picker-grid">
+                              {serverCustomEmojis.map(ce => (
+                                <button type="button" key={ce.id} className="emoji-item emoji-item-custom" title={`:${ce.name}:`} onClick={() => { setInput(v => v + `:${ce.name}:`); setShowEmojiPicker(false) }}>
+                                  <img src={ce.url} alt={ce.name} style={{ width: 24, height: 24, objectFit: 'contain' }} />
+                                </button>
+                              ))}
+                            </div>
+                            <div className="emoji-picker-section-label">Стандартные</div>
+                          </>
+                        )}
                         <div className="emoji-picker-cats">
                           {Object.entries(emojiData).map(([key, cat]) => (
                             <button key={key} className={`emoji-cat-btn ${emojiCategory === key ? 'active' : ''}`} onClick={() => setEmojiCategory(key)} title={cat.label}>{cat.icon}</button>
@@ -3763,8 +5196,42 @@ export default function Chat() {
                             ? Object.values(emojiData).flatMap(c => c.emojis)
                             : emojiData[emojiCategory]?.emojis || []
                           ).filter(e => !emojiSearch || e.includes(emojiSearch)).map((emoji, i) => (
-                            <button key={i} className="emoji-item" onClick={() => insertEmoji(emoji)}>{emoji}</button>
+                            <button type="button" key={i} className="emoji-item" onClick={() => insertEmoji(emoji)}>{emoji}</button>
                           ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                  <div className="gif-btn-wrapper" ref={gifPickerRef}>
+                    <button type="button" className="input-btn gif-toggle-btn" onClick={openGifPicker} title="GIF">
+                      <span className="gif-btn-label">GIF</span>
+                    </button>
+                    {showGifPicker && (
+                      <div className="gif-picker">
+                        <div className="gif-picker-search">
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+                          <input type="text" placeholder="Поиск GIF..." value={gifSearch} autoFocus
+                            onChange={e => {
+                              const q = e.target.value; setGifSearch(q)
+                              clearTimeout(gifSearchTimer.current)
+                              gifSearchTimer.current = setTimeout(() => fetchGifs(q), 400)
+                            }} />
+                        </div>
+                        <div className="gif-picker-grid">
+                          {gifLoading ? (
+                            <div className="gif-picker-loading">
+                              <div className="gif-picker-spinner" />
+                            </div>
+                          ) : gifResults.length === 0 ? (
+                            <div className="gif-picker-empty">Ничего не найдено</div>
+                          ) : gifResults.map(gif => (
+                            <div key={gif.id} className="gif-item" onClick={() => sendGif(gif)}>
+                              <img src={gif.images.fixed_width.url} alt={gif.title} loading="lazy" />
+                            </div>
+                          ))}
+                        </div>
+                        <div className="gif-picker-footer">
+                          <img src="https://developers.giphy.com/branch/master/static/header-logo-8974b8ae658f704a5b48a2d039b8ad93.gif" alt="Powered by GIPHY" className="giphy-logo" />
                         </div>
                       </div>
                     )}
@@ -3854,6 +5321,7 @@ export default function Chat() {
                         <div key={f.id} className="friend-item">
                           <div className="friend-item-left">
                             <div className="member-avatar" style={{ background: f.avatarColor }}>
+                              <AImg src={f.avatar} />
                               {f.username[0].toUpperCase()}
                               <div className={`status-dot ${f.status}`} />
                             </div>
@@ -3867,7 +5335,7 @@ export default function Chat() {
                               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
                               <span className="friend-action-tooltip">{t('friends.message')}</span>
                             </button>
-                            <button className="friend-action-btn friend-action-call" disabled>
+                            <button className="friend-action-btn friend-action-call" onClick={async () => { const dm = await openDM(f.id); if (dm) startDmCall(dm.id, { id: f.id, username: f.username, avatarColor: f.avatarColor }) }}>
                               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07 19.5 19.5 0 01-6-6 19.79 19.79 0 01-3.07-8.67A2 2 0 014.11 2h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L8.09 9.91a16 16 0 006 6l1.27-1.27a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0122 16.92z"/></svg>
                               <span className="friend-action-tooltip">{t('friends.call')}</span>
                             </button>
@@ -3909,6 +5377,7 @@ export default function Chat() {
                             <div key={fr.id} className="friend-item">
                               <div className="friend-item-left">
                                 <div className="member-avatar" style={{ background: fr.from.avatarColor }}>
+                                  <AImg src={fr.from.avatar} />
                                   {fr.from.username[0].toUpperCase()}
                                   <div className={`status-dot ${fr.from.status}`} />
                                 </div>
@@ -3936,6 +5405,7 @@ export default function Chat() {
                             <div key={fr.id} className="friend-item">
                               <div className="friend-item-left">
                                 <div className="member-avatar" style={{ background: fr.to.avatarColor }}>
+                                  <AImg src={fr.to.avatar} />
                                   {fr.to.username[0].toUpperCase()}
                                   <div className={`status-dot ${fr.to.status}`} />
                                 </div>
@@ -4006,6 +5476,7 @@ export default function Chat() {
                       <div className="friend-item">
                         <div className="friend-item-left">
                           <div className="member-avatar" style={{ background: friendSearchResult.user.avatarColor }}>
+                            <AImg src={friendSearchResult.user.avatar} />
                             {friendSearchResult.user.username[0].toUpperCase()}
                             <div className={`status-dot ${friendSearchResult.user.status}`} />
                           </div>
@@ -4048,6 +5519,7 @@ export default function Chat() {
                         <div key={bu.id} className="friend-item">
                           <div className="friend-item-left">
                             <div className="member-avatar" style={{ background: bu.avatarColor }}>
+                              <AImg src={bu.avatar} />
                               {bu.username[0].toUpperCase()}
                             </div>
                             <div className="friend-item-info">
@@ -4116,27 +5588,28 @@ export default function Chat() {
                       {showScreen ? (
                         <video
                           key={focusedStreamUser + '-screen'}
-                          ref={el => { if (el) el.srcObject = focusedIsLocal ? screenStream.current : (remoteScreenStreams[focusedUser.socketId] || remoteVideoStreams[focusedUser.socketId]) }}
+                          ref={el => { if (el) { const _s = focusedIsLocal ? screenStream.current : (remoteScreenStreams[focusedUser.socketId] || remoteVideoStreams[focusedUser.socketId]); if (el.srcObject !== _s) el.srcObject = _s } }}
                           autoPlay muted={focusedIsLocal} playsInline
                           className="voice-focused-video"
                         />
                       ) : showCamera || (focusedHasCamera && !focusedIsScreenSharing) ? (
                         <video
                           key={focusedStreamUser + '-camera'}
-                          ref={el => { if (el) el.srcObject = focusedIsLocal ? cameraStream.current : remoteVideoStreams[focusedUser.socketId] }}
+                          ref={el => { if (el) { const _s = focusedIsLocal ? cameraStream.current : remoteVideoStreams[focusedUser.socketId]; if (el.srcObject !== _s) el.srcObject = _s } }}
                           autoPlay muted={focusedIsLocal} playsInline
                           className={`voice-focused-video ${focusedIsLocal ? 'mirror' : ''}`}
                         />
                       ) : focusedIsScreenSharing ? (
                         <video
                           key={focusedStreamUser + '-screen-fallback'}
-                          ref={el => { if (el) el.srcObject = focusedIsLocal ? screenStream.current : (remoteScreenStreams[focusedUser.socketId] || remoteVideoStreams[focusedUser.socketId]) }}
+                          ref={el => { if (el) { const _s = focusedIsLocal ? screenStream.current : (remoteScreenStreams[focusedUser.socketId] || remoteVideoStreams[focusedUser.socketId]); if (el.srcObject !== _s) el.srcObject = _s } }}
                           autoPlay muted={focusedIsLocal} playsInline
                           className="voice-focused-video"
                         />
                       ) : (
                         <div className="voice-focused-avatar-wrap">
                           <div className="voice-focused-avatar" style={{ background: focusedUser.avatarColor }}>
+                            <AImg src={focusedUser.avatar} />
                             {focusedUser.username[0].toUpperCase()}
                           </div>
                         </div>
@@ -4186,27 +5659,27 @@ export default function Chat() {
                               if (isFocused && vuHasBoth) {
                                 if (focusedStreamType === 'screen') {
                                   // Main shows screen, mini shows camera
-                                  if (vuIsLocal) return <video ref={el => { if (el && cameraStream.current) el.srcObject = cameraStream.current }} autoPlay muted playsInline className="voice-tile-video mirror" />
+                                  if (vuIsLocal) return <video ref={el => { if (el) { const _s = cameraStream.current; if (_s && el.srcObject !== _s) el.srcObject = _s } }} autoPlay muted playsInline className="voice-tile-video mirror" />
                                   return remoteVideoStreams[vu.socketId]
-                                    ? <video ref={el => { if (el) el.srcObject = remoteVideoStreams[vu.socketId] }} autoPlay playsInline className="voice-tile-video" />
-                                    : <div className="voice-tile-avatar" style={{ background: vu.avatarColor }}>{vu.username[0].toUpperCase()}</div>
+                                    ? <video ref={el => { if (el) { const _s = remoteVideoStreams[vu.socketId]; if (el.srcObject !== _s) el.srcObject = _s } }} autoPlay playsInline className="voice-tile-video" />
+                                    : <div className="voice-tile-avatar" style={{ background: vu.avatarColor }}><AImg src={vu.avatar} />{vu.username[0].toUpperCase()}</div>
                                 } else {
                                   // Main shows camera, mini shows screen
-                                  if (vuIsLocal && screenStream.current) return <video ref={el => { if (el && screenStream.current) el.srcObject = screenStream.current }} autoPlay muted playsInline className="voice-tile-video" />
+                                  if (vuIsLocal && screenStream.current) return <video ref={el => { if (el) { const _s = screenStream.current; if (_s && el.srcObject !== _s) el.srcObject = _s } }} autoPlay muted playsInline className="voice-tile-video" />
                                   const scrSrc = remoteScreenStreams[vu.socketId] || remoteVideoStreams[vu.socketId]
                                   return scrSrc
-                                    ? <video ref={el => { if (el) el.srcObject = scrSrc }} autoPlay playsInline className="voice-tile-video" />
-                                    : <div className="voice-tile-avatar" style={{ background: vu.avatarColor }}>{vu.username[0].toUpperCase()}</div>
+                                    ? <video ref={el => { if (el) { const _s = scrSrc; if (el.srcObject !== _s) el.srcObject = _s } }} autoPlay playsInline className="voice-tile-video" />
+                                    : <div className="voice-tile-avatar" style={{ background: vu.avatarColor }}><AImg src={vu.avatar} />{vu.username[0].toUpperCase()}</div>
                                 }
                               }
                               // Normal mini tile
                               if (vuIsLocal && cameraOn && cameraStream.current) {
-                                return <video ref={el => { if (el && cameraStream.current) el.srcObject = cameraStream.current }} autoPlay muted playsInline className="voice-tile-video mirror" />
+                                return <video ref={el => { if (el) { const _s = cameraStream.current; if (_s && el.srcObject !== _s) el.srcObject = _s } }} autoPlay muted playsInline className="voice-tile-video mirror" />
                               }
                               if (!vuIsLocal && remoteVideoStreams[vu.socketId]) {
-                                return <video ref={el => { if (el && remoteVideoStreams[vu.socketId]) el.srcObject = remoteVideoStreams[vu.socketId] }} autoPlay playsInline className="voice-tile-video" />
+                                return <video ref={el => { if (el) { const _s = remoteVideoStreams[vu.socketId]; if (_s && el.srcObject !== _s) el.srcObject = _s } }} autoPlay playsInline className="voice-tile-video" />
                               }
-                              return <div className="voice-tile-avatar" style={{ background: vu.avatarColor }}>{vu.username[0].toUpperCase()}</div>
+                              return <div className="voice-tile-avatar" style={{ background: vu.avatarColor }}><AImg src={vu.avatar} />{vu.username[0].toUpperCase()}</div>
                             })()}
                             <div className="voice-tile-overlay">
                               <div className="voice-tile-name">{vu.username}</div>
@@ -4250,12 +5723,13 @@ export default function Chat() {
                           {isScreenSharing && !isLocal && hasRemoteScreen ? (
                             /* Remote screen share tile — show actual screen stream, click to enter focused view */
                             <div style={{ position: 'relative', width: '100%', height: '100%', cursor: 'pointer' }} onClick={() => { setFocusedStreamUser(vu.id); setFocusedStreamType('screen') }}>
-                              <video ref={el => { if (el && remoteScreenSrc) el.srcObject = remoteScreenSrc }} autoPlay playsInline className="voice-tile-video" />
+                              <video ref={el => { if (el) { const _s = remoteScreenSrc; if (_s && el.srcObject !== _s) el.srcObject = _s } }} autoPlay playsInline className="voice-tile-video" />
                             </div>
                           ) : isScreenSharing && isLocal && !hasLocalCamera ? (
                             /* Local screen share tile — show "View" button */
                             <div className="voice-tile-screen-preview">
                               <div className="voice-tile-avatar small" style={{ background: vu.avatarColor }}>
+                                <AImg src={vu.avatar} />
                                 {vu.username[0].toUpperCase()}
                               </div>
                               <div className="voice-tile-screen-info">
@@ -4268,11 +5742,12 @@ export default function Chat() {
                               </div>
                             </div>
                           ) : hasLocalCamera ? (
-                            <video ref={el => { if (el && cameraStream.current) el.srcObject = cameraStream.current }} autoPlay muted playsInline className="voice-tile-video mirror" />
+                            <video ref={el => { if (el) { const _s = cameraStream.current; if (_s && el.srcObject !== _s) el.srcObject = _s } }} autoPlay muted playsInline className="voice-tile-video mirror" />
                           ) : hasRemoteVideo ? (
-                            <video ref={el => { if (el && remoteVideoStreams[vu.socketId]) el.srcObject = remoteVideoStreams[vu.socketId] }} autoPlay playsInline className="voice-tile-video" />
+                            <video ref={el => { if (el) { const _s = remoteVideoStreams[vu.socketId]; if (_s && el.srcObject !== _s) el.srcObject = _s } }} autoPlay playsInline className="voice-tile-video" />
                           ) : (
                             <div className="voice-tile-avatar" style={{ background: vu.avatarColor }}>
+                              <AImg src={vu.avatar} />
                               {vu.username[0].toUpperCase()}
                             </div>
                           )}
@@ -4500,35 +5975,40 @@ export default function Chat() {
                           </div>
                         )}
                         {isMsgPinned(msg, false) && !msg.deleted && <div className="msg-pin-indicator"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z"/></svg></div>}
-                        {!isGrouped && !selectMode && (
-                          <div className="msg-avatar clickable" style={{ background: msg.user.avatarColor }} onClick={(e) => showUserProfile(msg.user, e.clientX, e.clientY)}>
-                            {msg.user.username[0].toUpperCase()}
+                        {!isGrouped && !selectMode && (() => { const p = prof(msg.userId, msg.user); return (
+                          <div className={`msg-avatar clickable${p.avatarFrame ? ` avatar-frame-${p.avatarFrame}` : ''}`} style={{ background: p.avatarColor }} onClick={(e) => showUserProfile({ ...msg.user, ...userProfiles[msg.userId] }, e.clientX, e.clientY)}>
+                            <AImg src={p.avatar} />
+                            {p.username?.[0]?.toUpperCase()}
                           </div>
-                        )}
+                        )})()}
                         <div className="msg-content">
                           {msg.replyTo && (
                             <div className="msg-reply-ref" onClick={() => { const el = document.getElementById('msg-' + msg.replyTo.id); if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); el.classList.remove('msg-highlight'); void el.offsetWidth; el.classList.add('msg-highlight'); setTimeout(() => el.classList.remove('msg-highlight'), 2000) } }}>
-                              <div className="msg-reply-line" style={{ background: msg.replyTo.user?.avatarColor || 'var(--primary)' }} />
-                              <span className="msg-reply-author" style={{ color: msg.replyTo.user?.avatarColor }}>{msg.replyTo.user?.username || t('msg.deletedUser')}</span>
+                              <div className="msg-reply-line" style={{ background: 'var(--primary)' }} />
+                              <span className="msg-reply-author">{msg.replyTo.user?.username || t('msg.deletedUser')}</span>
                               <span className="msg-reply-text">{msg.replyTo.content || t('msg.replyContent')}</span>
                             </div>
                           )}
-                          {!isGrouped && (
+                          {!isGrouped && (() => { const p = prof(msg.userId, msg.user); return (
                             <div className="msg-header">
-                              <span className={`msg-author clickable ${streamerMode && msg.userId === user.id ? 'streamer-blur' : ''}`} style={{ color: msg.user.avatarColor }} onClick={(e) => showUserProfile(msg.user, e.clientX, e.clientY)}><span className="msg-author-name">{msg.user.username}</span><span className="user-tag">#{msg.user.tag}</span></span>
+                              <span className={`msg-author clickable ${streamerMode && msg.userId === user.id ? 'streamer-blur' : ''}`} onClick={(e) => showUserProfile({ ...msg.user, ...userProfiles[msg.userId] }, e.clientX, e.clientY)}><span className="msg-author-name">{p.username}</span><span className="user-tag">#{p.tag}</span>{p.statusEmoji && <span className="msg-status-emoji" title="Статус">{p.statusEmoji}</span>}</span>
                               <span className="msg-time">{formatTime(msg.createdAt)}</span>
                             </div>
-                          )}
+                          )})()}
                           {msg.deleted ? (
                             <div className="msg-text message-deleted">{t('msg.deleted')}</div>
                           ) : editingMsg && editingMsg.id === msg.id ? (
                             <div className="msg-edit-wrap">
-                              <input ref={editInputRef} className="msg-edit-input" value={editingMsg.content} onChange={e => setEditingMsg(prev => ({ ...prev, content: e.target.value }))} onKeyDown={e => { if (e.key === 'Enter') saveEditMsg(); if (e.key === 'Escape') cancelEdit() }} />
+                              <input ref={editInputRef} className="msg-edit-input" value={editingMsg.content} maxLength={1500} onChange={e => setEditingMsg(prev => ({ ...prev, content: e.target.value.slice(0, 1500) }))} onKeyDown={e => { if (e.key === 'Enter') saveEditMsg(); if (e.key === 'Escape') cancelEdit() }} />
                               <div className="msg-edit-hint">{t('msg.edited')}</div>
                             </div>
                           ) : (
                             <>
-                              {msg.content && <div className="msg-text">{msg.content}{msg.editedAt && <span className="msg-edited">{t('msg.edited')}</span>}</div>}
+                              {msg.content && (
+                                /^https:\/\/media\d*\.giphy\.com\//i.test(msg.content)
+                                  ? <div className="msg-gif"><img src={msg.content} alt="GIF" className="msg-gif-img" loading="lazy" /></div>
+                                  : <div className={`msg-text${emojiOnlyCount(msg.content) ? " msg-big-emoji" : ""}`}>{renderContent(msg.content)}{msg.editedAt && <span className="msg-edited">{t('msg.edited')}</span>}</div>
+                              )}
                             </>
                           )}
                           {msg.attachment && (
@@ -4596,35 +6076,41 @@ export default function Chat() {
                   {onlineMembers.length > 0 && (
                     <>
                       <div className="members-category">{t('members.online')} — {onlineMembers.length}</div>
-                      {onlineMembers.map(m => (
-                        <div key={m.id} className="member-item" onContextMenu={e => { if ((hasServerPerm('kickMembers') || hasServerPerm('manageRoles')) && m.id !== user.id) { e.preventDefault(); setMemberCtx({ member: m, x: e.clientX, y: e.clientY }) } }}>
-                          <div className="member-avatar" style={{ background: m.avatarColor }}>
-                            {m.username[0].toUpperCase()}
-                            <div className={`status-dot ${m.status}`} />
+                      {onlineMembers.map(m => { const p = prof(m.id, m); return (
+                        <div key={m.id} className="member-item" onClick={e => showUserProfile(p, e.clientX, e.clientY)} onContextMenu={e => { if ((hasServerPerm('kickMembers') || hasServerPerm('manageRoles')) && m.id !== user.id) { e.preventDefault(); setMemberCtx({ member: m, x: e.clientX, y: e.clientY }) } }}>
+                          <div className="member-avatar-wrap">
+                            <div className={`member-avatar${p.avatarFrame ? ` avatar-frame-${p.avatarFrame}` : ''}`} style={{ background: p.avatarColor }}>
+                              <AImg src={p.avatar} />
+                              {p.username?.[0]?.toUpperCase()}
+                            </div>
+                            <div className={`status-dot ${p.status || m.status}`} />
                           </div>
-                          <span className={streamerMode && m.id === user.id ? 'streamer-blur' : ''}>{m.username}<span className="user-tag">#{m.tag}</span></span>
+                          <span className={streamerMode && m.id === user.id ? 'streamer-blur' : ''} style={{ color: getMemberRoleColor(m.id) || undefined }}>{p.username}{p.statusEmoji && <span className="msg-status-emoji">{p.statusEmoji}</span>}<span className="user-tag" style={{ color: undefined }}>#{p.tag}</span></span>
                           {m.role === 'owner' && <span className="role-badge owner" title={t('members.owner')}>👑</span>}
                           {m.role === 'admin' && <span className="role-badge admin" title={t('role.admin')}>🛡️</span>}
                           {(() => { const cr = (activeServer?.customRoles || []).find(r => r.id === m.role); return cr ? <span className="role-badge custom" style={{ color: cr.color }} title={cr.name}>{cr.name}</span> : null })()}
                         </div>
-                      ))}
+                      )})}
                     </>
                   )}
                   {offlineMembers.length > 0 && (
                     <>
                       <div className="members-category">{t('members.offline')} — {offlineMembers.length}</div>
-                      {offlineMembers.map(m => (
-                        <div key={m.id} className="member-item offline" onContextMenu={e => { if ((hasServerPerm('kickMembers') || hasServerPerm('manageRoles')) && m.id !== user.id) { e.preventDefault(); setMemberCtx({ member: m, x: e.clientX, y: e.clientY }) } }}>
-                          <div className="member-avatar" style={{ background: m.avatarColor, opacity: 0.4 }}>
-                            {m.username[0].toUpperCase()}
+                      {offlineMembers.map(m => { const p = prof(m.id, m); return (
+                        <div key={m.id} className="member-item offline" onClick={e => showUserProfile(p, e.clientX, e.clientY)} onContextMenu={e => { if ((hasServerPerm('kickMembers') || hasServerPerm('manageRoles')) && m.id !== user.id) { e.preventDefault(); setMemberCtx({ member: m, x: e.clientX, y: e.clientY }) } }}>
+                          <div className="member-avatar-wrap">
+                            <div className="member-avatar" style={{ background: p.avatarColor, opacity: 0.4 }}>
+                              <AImg src={p.avatar} />
+                              {p.username?.[0]?.toUpperCase()}
+                            </div>
                             <div className="status-dot" />
                           </div>
-                          <span className={streamerMode && m.id === user.id ? 'streamer-blur' : ''}>{m.username}<span className="user-tag">#{m.tag}</span></span>
+                          <span className={streamerMode && m.id === user.id ? 'streamer-blur' : ''} style={{ color: getMemberRoleColor(m.id) || undefined }}>{p.username}<span className="user-tag" style={{ color: undefined }}>#{p.tag}</span></span>
                           {m.role === 'owner' && <span className="role-badge owner" title={t('members.owner')}>👑</span>}
                           {m.role === 'admin' && <span className="role-badge admin" title={t('role.admin')}>🛡️</span>}
                           {(() => { const cr = (activeServer?.customRoles || []).find(r => r.id === m.role); return cr ? <span className="role-badge custom" style={{ color: cr.color }} title={cr.name}>{cr.name}</span> : null })()}
                         </div>
-                      ))}
+                      )})}
                     </>
                   )}
                 </div>
@@ -4684,15 +6170,17 @@ export default function Chat() {
                     </div>
                   )}
                 </div>
-                <input
-                  type="text"
+                <textarea
+                  className="chat-textarea"
                   placeholder={slowmodeCooldown > 0 ? `${t('slowmode.wait')} ${slowmodeCooldown} ${t('slowmode.sec')}` : `${t('msg.typePlaceholder')}`}
                   value={input}
                   onChange={handleInput}
-                  maxLength={200}
+                  onKeyDown={e => handleChatKeyDown(e, sendMessage)}
+                  maxLength={1500}
+                  rows={1}
                   autoFocus
                 />
-                {input.length > 150 && <span className="char-counter" style={{ color: input.length >= 200 ? 'var(--danger)' : 'var(--text-muted)' }}>{input.length}/200</span>}
+                {input.length > 1300 && <span className="char-counter" style={{ color: input.length >= 1500 ? 'var(--danger)' : 'var(--text-muted)' }}>{input.length}/1500</span>}
                 {activeChannel.slowmode > 0 && (() => {
                   const isOwner = activeServer && activeServer.ownerId === user.id
                   const sm = activeChannel.slowmode
@@ -4727,8 +6215,40 @@ export default function Chat() {
                           ? Object.values(emojiData).flatMap(c => c.emojis)
                           : emojiData[emojiCategory]?.emojis || []
                         ).filter(e => !emojiSearch || e.includes(emojiSearch)).map((emoji, i) => (
-                          <button key={i} className="emoji-item" onClick={() => insertEmoji(emoji)}>{emoji}</button>
+                          <button type="button" key={i} className="emoji-item" onClick={() => insertEmoji(emoji)}>{emoji}</button>
                         ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+                <div className="gif-btn-wrapper" ref={gifPickerRef}>
+                  <button type="button" className="input-btn gif-toggle-btn" onClick={openGifPicker} title="GIF">
+                    <span className="gif-btn-label">GIF</span>
+                  </button>
+                  {showGifPicker && (
+                    <div className="gif-picker">
+                      <div className="gif-picker-search">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+                        <input type="text" placeholder="Поиск GIF..." value={gifSearch} autoFocus
+                          onChange={e => {
+                            const q = e.target.value; setGifSearch(q)
+                            clearTimeout(gifSearchTimer.current)
+                            gifSearchTimer.current = setTimeout(() => fetchGifs(q), 400)
+                          }} />
+                      </div>
+                      <div className="gif-picker-grid">
+                        {gifLoading ? (
+                          <div className="gif-picker-loading"><div className="gif-picker-spinner" /></div>
+                        ) : gifResults.length === 0 ? (
+                          <div className="gif-picker-empty">Ничего не найдено</div>
+                        ) : gifResults.map(gif => (
+                          <div key={gif.id} className="gif-item" onClick={() => sendGif(gif)}>
+                            <img src={gif.images.fixed_width.url} alt={gif.title} loading="lazy" />
+                          </div>
+                        ))}
+                      </div>
+                      <div className="gif-picker-footer">
+                        <img src="https://developers.giphy.com/branch/master/static/header-logo-8974b8ae658f704a5b48a2d039b8ad93.gif" alt="Powered by GIPHY" className="giphy-logo" />
                       </div>
                     </div>
                   )}
@@ -4759,10 +6279,40 @@ export default function Chat() {
               <span>{t('message.replyAction')}</span>
             </button>
           )}
-          {msgCtx.msg.content && (
+          {msgCtx.msg.content && !(/^https:\/\/media\d*\.giphy\.com\//i.test(msgCtx.msg.content)) && (
             <button className="ctx-item" onClick={() => copyMsgText(msgCtx.msg.content)}>
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
               <span>{t('msg.copyText')}</span>
+            </button>
+          )}
+          {msgCtx.msg.content && /^https:\/\/media\d*\.giphy\.com\//i.test(msgCtx.msg.content) && (
+            <button className="ctx-item" onClick={() => saveMedia(msgCtx.msg.content, 'animation.gif')}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+              <span>Сохранить GIF</span>
+            </button>
+          )}
+          {msgCtx.msg.attachment?.fileType === 'image' && (
+            <button className="ctx-item" onClick={() => saveMedia(msgCtx.msg.attachment.url, msgCtx.msg.attachment.fileName)}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+              <span>Сохранить фото</span>
+            </button>
+          )}
+          {msgCtx.msg.attachment?.fileType === 'video' && (
+            <button className="ctx-item" onClick={() => saveMedia(msgCtx.msg.attachment.url, msgCtx.msg.attachment.fileName)}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+              <span>Сохранить видео</span>
+            </button>
+          )}
+          {msgCtx.msg.attachment && !['image','video','audio'].includes(msgCtx.msg.attachment.fileType) && (
+            <button className="ctx-item" onClick={() => saveMedia(msgCtx.msg.attachment.url, msgCtx.msg.attachment.fileName)}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+              <span>Сохранить файл</span>
+            </button>
+          )}
+          {msgCtx.msg.attachment?.fileType === 'audio' && (
+            <button className="ctx-item" onClick={() => saveMedia(msgCtx.msg.attachment.url, msgCtx.msg.attachment.fileName)}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+              <span>Сохранить аудио</span>
             </button>
           )}
           {msgCtx.msg.userId === user.id && !msgCtx.msg.type && (
@@ -4951,6 +6501,156 @@ export default function Chat() {
         </div>
       )}
 
+      {showShop && (
+        <div className="modal-overlay shop-overlay" onClick={() => setShowShop(false)}>
+          <div className="shop-panel" onClick={e => e.stopPropagation()}>
+            <button className="settings-close" onClick={() => setShowShop(false)}>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+            </button>
+
+            {/* Shop header */}
+            <div className="shop-header">
+              <div className="shop-header-icon">✨</div>
+              <div>
+                <h2 className="shop-title">Буст Премиум</h2>
+                <p className="shop-subtitle">Расширь возможности — для себя и своих серверов</p>
+              </div>
+              {premiumStatus?.active && (
+                <div className="shop-active-badge">
+                  {premiumStatus.premium === 'pro' ? '💎 Про' : '⭐ Стандарт'}
+                  <span className="shop-expiry">до {new Date(premiumStatus.premiumExpiry).toLocaleDateString('ru-RU')}</span>
+                </div>
+              )}
+            </div>
+
+            {/* Tabs */}
+            <div className="shop-tabs">
+              <button className={`shop-tab ${shopTab === 'subscription' ? 'active' : ''}`} onClick={() => setShopTab('subscription')}>Подписка</button>
+              <button className={`shop-tab ${shopTab === 'boosts' ? 'active' : ''}`} onClick={() => setShopTab('boosts')}>
+                Голоса {boostData && <span className="shop-tab-badge">{boostData.free}/{boostData.total}</span>}
+              </button>
+            </div>
+
+            <div className="shop-content">
+              {shopTab === 'subscription' && (
+                <div className="shop-plans">
+                  {/* Standard */}
+                  <div className={`shop-plan ${premiumStatus?.premium === 'standard' ? 'active' : ''}`}>
+                    <div className="shop-plan-header">
+                      <span className="shop-plan-icon">⭐</span>
+                      <div>
+                        <div className="shop-plan-name">Стандарт</div>
+                        <div className="shop-plan-price">99 ₽ / мес</div>
+                      </div>
+                    </div>
+                    <ul className="shop-plan-features">
+                      <li>✅ 2 голоса для серверов</li>
+                      <li>✅ GIF-аватар</li>
+                      <li>✅ Эмодзи-значок у ника</li>
+                      <li>✅ Расширенное bio (500 симв.)</li>
+                      <li>✅ Трансляция экрана 720p</li>
+                      <li>✅ До 8 серверов</li>
+                    </ul>
+                    {premiumStatus?.premium === 'standard' ? (
+                      <button className="shop-plan-btn danger" onClick={cancelPremium} disabled={shopLoading}>Отменить подписку</button>
+                    ) : (
+                      <button className="shop-plan-btn" onClick={() => activatePremium('standard')} disabled={shopLoading}>
+                        {shopLoading ? 'Загрузка...' : premiumStatus?.premium === 'pro' ? 'Перейти на Стандарт' : 'Активировать'}
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Pro */}
+                  <div className={`shop-plan pro ${premiumStatus?.premium === 'pro' ? 'active' : ''}`}>
+                    <div className="shop-plan-badge">Лучший выбор</div>
+                    <div className="shop-plan-header">
+                      <span className="shop-plan-icon">💎</span>
+                      <div>
+                        <div className="shop-plan-name">Про</div>
+                        <div className="shop-plan-price">249 ₽ / мес</div>
+                      </div>
+                    </div>
+                    <ul className="shop-plan-features">
+                      <li>✅ 8 голосов для серверов</li>
+                      <li>✅ GIF-аватар и GIF-баннер</li>
+                      <li>✅ Эмодзи-значок у ника</li>
+                      <li>✅ Рамка аватара</li>
+                      <li>✅ Эффект профиля</li>
+                      <li>✅ Расширенное bio (500 симв.)</li>
+                      <li>✅ Трансляция экрана 1440p (2K)</li>
+                      <li>✅ До 20 серверов</li>
+                    </ul>
+                    {premiumStatus?.premium === 'pro' ? (
+                      <button className="shop-plan-btn danger" onClick={cancelPremium} disabled={shopLoading}>Отменить подписку</button>
+                    ) : (
+                      <button className="shop-plan-btn pro" onClick={() => activatePremium('pro')} disabled={shopLoading}>
+                        {shopLoading ? 'Загрузка...' : 'Активировать Про'}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {shopTab === 'boosts' && (
+                <div className="shop-boosts">
+                  {!premiumStatus?.active ? (
+                    <div className="shop-boosts-empty">
+                      <div style={{ fontSize:'2.5rem' }}>🚀</div>
+                      <p>Голоса доступны с подпиской Буст Премиум</p>
+                      <button className="shop-plan-btn" onClick={() => setShopTab('subscription')}>Выбрать подписку</button>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="shop-boosts-summary">
+                        <div className="shop-boosts-stat">
+                          <span className="shop-boosts-num">{boostData?.total ?? 0}</span>
+                          <span className="shop-boosts-label">всего</span>
+                        </div>
+                        <div className="shop-boosts-stat">
+                          <span className="shop-boosts-num" style={{ color: 'var(--primary)' }}>{boostData?.used ?? 0}</span>
+                          <span className="shop-boosts-label">розданы</span>
+                        </div>
+                        <div className="shop-boosts-stat">
+                          <span className="shop-boosts-num" style={{ color: 'var(--online)' }}>{boostData?.free ?? 0}</span>
+                          <span className="shop-boosts-label">свободны</span>
+                        </div>
+                      </div>
+
+                      <div className="shop-boosts-list">
+                        {servers.map(srv => {
+                          const myBoost = (boostData?.boostedServers || []).find(b => b.serverId === srv.id)
+                          const myAmount = myBoost?.amount || 0
+                          const srvData = servers.find(s => s.id === srv.id)
+                          const level = srvData?.boostLevel ?? 0
+                          return (
+                            <div key={srv.id} className="shop-boost-row">
+                              <div className="shop-boost-srv-info">
+                                <div className="shop-boost-srv-avatar" style={{ background: srv.avatarColor || 'var(--primary-dim)' }}>
+                                  {srv.avatar ? <img src={srv.avatar} alt="" style={{ width:'100%',height:'100%',objectFit:'cover',borderRadius:8 }}/> : <span>{srv.iconText}</span>}
+                                </div>
+                                <div>
+                                  <div className="shop-boost-srv-name">{srv.name}</div>
+                                  <div className="shop-boost-srv-level">{'🔥'.repeat(level) || '—'} Уровень {level}</div>
+                                </div>
+                              </div>
+                              <div className="shop-boost-controls">
+                                <button className="shop-boost-btn" onClick={() => removeBoost(srv.id, 1)} disabled={myAmount === 0}>−</button>
+                                <span className="shop-boost-count">{myAmount}</span>
+                                <button className="shop-boost-btn" onClick={() => giveBoost(srv.id, 1)} disabled={(boostData?.free ?? 0) === 0}>+</button>
+                              </div>
+                            </div>
+                          )
+                        })}
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {showProfileSettings && (
         <div className="modal-overlay settings-overlay" onClick={() => setShowProfileSettings(false)}>
           <div className="settings-panel" onClick={e => e.stopPropagation()}>
@@ -4958,14 +6658,24 @@ export default function Chat() {
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
             </button>
             <div className="settings-sidebar">
-              <div className="settings-sidebar-label">{t('settings.title')}</div>
+              <div className="settings-sidebar-group-label">Настройки пользователя</div>
               <button className={`settings-sidebar-item ${settingsTab === 'profile' ? 'active' : ''}`} onClick={() => setSettingsTab('profile')}>
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
-                {t('settings.profile')}
+                Мой профиль
               </button>
+              <button className={`settings-sidebar-item ${settingsTab === 'privacy' ? 'active' : ''}`} onClick={() => setSettingsTab('privacy')}>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
+                Конфиденциальность
+              </button>
+              <div className="settings-sidebar-divider" />
+              <div className="settings-sidebar-group-label">Настройки приложения</div>
               <button className={`settings-sidebar-item ${settingsTab === 'app' ? 'active' : ''}`} onClick={() => setSettingsTab('app')}>
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
-                {t('settings.app')}
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
+                Внешний вид
+              </button>
+              <button className={`settings-sidebar-item ${settingsTab === 'lang' ? 'active' : ''}`} onClick={() => setSettingsTab('lang')}>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/></svg>
+                Язык и время
               </button>
               <div className="settings-sidebar-divider" />
               <button className="settings-sidebar-item danger" onClick={logout}>
@@ -4978,14 +6688,116 @@ export default function Chat() {
                 <div className="settings-page">
                   <h2>{t('settings.profileTitle')}</h2>
                   <p className="settings-page-desc">{t('settings.profileDesc')}</p>
-                  <div className="profile-preview">
-                    <div className="profile-preview-avatar" style={{ background: user.avatarColor }}>
-                      {(profileForm.username || user.username)[0].toUpperCase()}
-                      <div className={`status-dot ${user.status || 'online'}`} />
+                  {/* Mini profile card preview */}
+                  <div className="profile-settings-card" style={{ position:'relative' }}>
+                    <div
+                      className={`profile-settings-banner${premiumStatus?.active ? ' banner-clickable' : ''}`}
+                      style={profileForm.bannerImg ? { backgroundImage: `url(${profileForm.bannerImg})`, backgroundSize: 'cover', backgroundPosition: 'center' } : { background: bannerGradient(profileForm.bannerColor || user.avatarColor) }}
+                      onClick={() => premiumStatus?.active && setShowBannerOptions(v => !v)}
+                    >
+                      {premiumStatus?.active && (
+                        <div className="banner-edit-overlay">
+                          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2" strokeLinecap="round"><path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z"/><circle cx="12" cy="13" r="4"/></svg>
+                          <span>Изменить баннер</span>
+                        </div>
+                      )}
                     </div>
-                    <div className="profile-preview-info">
-                      <span className={`profile-preview-name ${streamerMode ? 'streamer-blur' : ''}`}>{profileForm.username || user.username}<span className="user-tag">#{user.tag}</span></span>
-                      <span className="profile-preview-status">{statusLabel(user.status)}</span>
+                    {showBannerOptions && (
+                      <div className="banner-options-popup" onClick={e => e.stopPropagation()}>
+                        <button className="banner-opt-btn" onClick={() => { setShowBannerOptions(false); bannerInputRef.current?.click() }}>
+                          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+                          Загрузить изображение
+                        </button>
+                        <button className="banner-opt-btn" onClick={() => { setShowBannerOptions(false); setBannerGifSearch(''); fetchBannerGifs(''); setShowBannerGifPicker(true) }}>
+                          <span style={{ fontWeight:800, fontSize:'.75rem', letterSpacing:'.05em' }}>GIF</span>
+                          Выбрать GIF
+                        </button>
+                        {profileForm.bannerImg && (
+                          <button className="banner-opt-btn banner-opt-danger" onClick={() => { setProfileForm(f => ({ ...f, bannerImg: null })); setShowBannerOptions(false) }}>
+                            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
+                            Удалить баннер
+                          </button>
+                        )}
+                      </div>
+                    )}
+                    <input ref={bannerInputRef} type="file" accept="image/*" style={{ display:'none' }} onChange={e => {
+                      const file = e.target.files?.[0]; if (!file) return
+                      if (file.size > 10 * 1024 * 1024) { setProfileError('Max 10 MB'); return }
+                      const reader = new FileReader()
+                      reader.onload = () => {
+                        const img = new Image()
+                        img.onload = () => {
+                          const baseW = 500 * img.width / img.height
+                          const initScale = Math.max(460 / baseW, 100 / 150)
+                          setBannerCropScale(Math.max(initScale, 1))
+                          setBannerCropOffset({ x: 0, y: 0 })
+                          setBannerCropModal({ imgSrc: reader.result, imgEl: img })
+                        }
+                        img.src = reader.result
+                      }
+                      reader.readAsDataURL(file)
+                      e.target.value = ''
+                    }} />
+                    <div className="profile-settings-card-body">
+                      <div className={`profile-preview-avatar-wrap ${profileForm.avatarFrame ? `avatar-frame-${profileForm.avatarFrame}` : ''}`} onClick={() => avatarInputRef.current?.click()}>
+                        {user.avatar ? (
+                          <img src={user.avatar} alt="" className="profile-preview-avatar-img" />
+                        ) : (
+                          <div className="profile-preview-avatar" style={{ background: user.avatarColor }}>
+                            {(profileForm.username || user.username)[0].toUpperCase()}
+                          </div>
+                        )}
+                        <div className="profile-avatar-overlay">
+                          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2"><path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z"/><circle cx="12" cy="13" r="4"/></svg>
+                        </div>
+                        <div className={`status-dot ${user.status || 'offline'}`} />
+                        <input ref={avatarInputRef} type="file" accept="image/*" style={{ display: 'none' }} onChange={async (e) => {
+                          const file = e.target.files?.[0]
+                          if (!file) return
+                          if (file.size > 10 * 1024 * 1024) { setProfileError('Max 10 MB'); return }
+                          // GIF/WebP direct upload for Pro users (preserves animation)
+                          if ((file.type === 'image/gif' || file.type === 'image/webp') && user.premium === 'pro') {
+                            setAvatarUploading(true)
+                            try {
+                              const fd = new FormData()
+                              fd.append('avatar', file)
+                              const res = await fetch('/api/auth/avatar', { method: 'POST', headers: { Authorization: 'Bearer ' + localStorage.getItem('token') }, body: fd })
+                              if (!res.ok) { const err = await res.json(); setProfileError(err.error || 'Upload error'); return }
+                              const data = await res.json()
+                              setUser(prev => ({ ...prev, avatar: data.avatar }))
+                              socket?.emit('avatar-changed', { userId: user.id, avatar: data.avatar })
+                            } catch { setProfileError('Upload failed') }
+                            finally { setAvatarUploading(false); e.target.value = '' }
+                            return
+                          }
+                          if (file.type === 'image/gif' && user.premium !== 'pro') {
+                            setProfileError('GIF-аватар доступен только с подпиской Про 💎')
+                            e.target.value = ''; return
+                          }
+                          const reader = new FileReader()
+                          reader.onload = () => {
+                            const img = new Image()
+                            img.onload = () => {
+                              const bW = 300 * img.width / img.height
+                              const initScale = Math.max(1, 220 / bW, 220 / 300)
+                              setCropScale(initScale); setCropOffset({ x: 0, y: 0 })
+                              setAvatarCropModal({ imgSrc: reader.result, imgEl: img })
+                            }
+                            img.src = reader.result
+                          }
+                          reader.readAsDataURL(file)
+                          e.target.value = ''
+                        }} />
+                      </div>
+                      <div className="profile-settings-card-info">
+                        <span className={`profile-preview-name ${streamerMode ? 'streamer-blur' : ''}`}>{profileForm.username || user.username}<span className="user-tag">#{user.tag}</span>{profileForm.statusEmoji && <span style={{ marginLeft: 6, fontSize: '1rem' }}>{profileForm.statusEmoji}</span>}</span>
+                        <span className="profile-preview-status">{statusLabel(user.status)}</span>
+                        {user.avatar && (
+                          <button type="button" className="profile-avatar-remove" onClick={async () => {
+                            try { await API('/api/auth/avatar', { method: 'DELETE' }); setUser(prev => ({ ...prev, avatar: null })) } catch {}
+                          }}>Удалить аватар</button>
+                        )}
+                      </div>
                     </div>
                   </div>
                   {profileError && <div className="auth-error">{profileError}</div>}
@@ -4994,17 +6806,89 @@ export default function Chat() {
                       <label>{t('settings.username')}</label>
                       <input type="text" value={profileForm.username} onChange={e => setProfileForm({ ...profileForm, username: e.target.value })} required />
                     </div>
+                    {user.premium === 'pro' && (
+                      <div className="field">
+                        <label>Рамка аватара 💎</label>
+                        <div className="avatar-frame-picker">
+                          {[
+                            { id: null, label: 'Нет', preview: null },
+                            { id: 'glow-purple', label: 'Фиолетовый', color: '#7c5cfc' },
+                            { id: 'gold', label: 'Золото', color: '#f59e0b' },
+                            { id: 'fire', label: 'Огонь', color: '#ef4444' },
+                            { id: 'ice', label: 'Лёд', color: '#06b6d4' },
+                            { id: 'neon', label: 'Неон', color: '#10b981' },
+                            { id: 'galaxy', label: 'Галактика', color: 'linear-gradient(135deg,#7c5cfc,#ec4899,#06b6d4)' },
+                          ].map(frame => (
+                            <button
+                              key={String(frame.id)}
+                              type="button"
+                              className={`avatar-frame-option ${profileForm.avatarFrame === frame.id ? 'active' : ''}`}
+                              onClick={() => setProfileForm(f => ({ ...f, avatarFrame: frame.id }))}
+                              title={frame.label}
+                            >
+                              <div
+                                className={`avatar-frame-preview ${frame.id ? `avatar-frame-${frame.id}` : ''}`}
+                                style={{ background: user.avatarColor, width: 32, height: 32, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '.75rem', fontWeight: 700, color: '#fff' }}
+                              >
+                                {user.username[0].toUpperCase()}
+                              </div>
+                              <span style={{ fontSize: '.65rem', color: 'var(--text-muted)', marginTop: 2 }}>{frame.label}</span>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {user.premium && (
+                      <div className="field">
+                        <label>Эмодзи-значок у ника {user.premium === 'pro' ? '💎' : '⭐'}</label>
+                        <div className="status-emoji-pick-row" style={{ position: 'relative' }}>
+                          <button type="button" className="status-emoji-pick-btn" onClick={() => setShowEmojiPickerProfile(v => !v)}>
+                            {profileForm.statusEmoji ? <span style={{ fontSize: '1.3rem' }}>{profileForm.statusEmoji}</span> : <span style={{ color: 'var(--text-muted)', fontSize: '.85rem' }}>Выбрать эмодзи</span>}
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/></svg>
+                          </button>
+                          {profileForm.statusEmoji && (
+                            <button type="button" className="status-emoji-clear-btn" onClick={() => setProfileForm(f => ({ ...f, statusEmoji: null }))} title="Убрать">
+                              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                            </button>
+                          )}
+                          {showEmojiPickerProfile && (
+                            <div className="emoji-picker status-emoji-picker-float" style={{ position: 'absolute', top: '110%', left: 0, zIndex: 200 }}>
+                              <div className="emoji-picker-search"><input type="text" placeholder={t('emoji.search')} autoFocus onChange={e => {}} /></div>
+                              <div className="emoji-picker-grid">
+                                {['😀','😂','🥰','😎','🤩','🥳','😍','🤔','😤','🔥','⭐','💎','👑','🎉','🎮','🎵','🎨','🏆','💪','🚀','🌟','✨','💫','🌈','🎯','🎲','🧠','💡','🔮','🎭','👾','🤖','🦋','🌸','🍀','🦁','🐺','🦊','🐉','🌙'].map(emoji => (
+                                  <button key={emoji} type="button" className="emoji-btn" onClick={() => { setProfileForm(f => ({ ...f, statusEmoji: emoji })); setShowEmojiPickerProfile(false) }}>{emoji}</button>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
                     <div className="field">
-                      <label>{t('settings.aboutMe')}</label>
+                      <label>{t('settings.aboutMe')}{user.premium && <span className="field-label-badge">{user.premium === 'pro' ? '💎 500 симв.' : '⭐ 500 симв.'}</span>}</label>
                       <textarea
                         className="profile-textarea"
                         placeholder={t('settings.aboutPlaceholder')}
                         value={profileForm.bio}
                         onChange={e => setProfileForm({ ...profileForm, bio: e.target.value })}
-                        maxLength={200}
+                        maxLength={user.premium ? 500 : 200}
                         rows={3}
                       />
-                      <div className="field-counter">{profileForm.bio.length}/200</div>
+                      <div className="field-counter">{profileForm.bio.length}/{user.premium ? 500 : 200}</div>
+                    </div>
+                    <div className="field">
+                      <label>Баннер профиля</label>
+                      <div className="banner-color-picker-row">
+                        <div className="banner-color-swatch" style={{ background: bannerGradient(profileForm.bannerColor || user.avatarColor) }} title="Изменить цвет баннера" onClick={() => document.getElementById('banner-color-input').click()}>
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.9)" strokeWidth="2" strokeLinecap="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+                          <input id="banner-color-input" type="color" value={profileForm.bannerColor || '#7c5cfc'} style={{ position:'absolute', opacity:0, width:0, height:0, pointerEvents:'none' }} onChange={e => setProfileForm(f => ({ ...f, bannerColor: e.target.value }))} />
+                        </div>
+                        {profileForm.bannerColor && (
+                          <button type="button" className="banner-color-clear" onClick={() => setProfileForm(f => ({ ...f, bannerColor: null }))} title="Сбросить цвет">
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                          </button>
+                        )}
+                      </div>
                     </div>
                     <div className="modal-actions">
                       <button type="button" className="btn-cancel" onClick={() => setShowProfileSettings(false)}>{t('settings.cancel')}</button>
@@ -5019,53 +6903,35 @@ export default function Chat() {
                 <div className="settings-page">
                   <h2>{t('settings.appSettings')}</h2>
                   <div className="settings-section">
-                    <label className="settings-section-title">{t('settings.language')}</label>
-                    <div className="settings-lang-options">
-                      {[
-                        { code: 'ru', label: 'Русский', flag: '🇷🇺' },
-                        { code: 'en', label: 'English', flag: '🇬🇧' },
-                        { code: 'zh', label: '中文', flag: '🇨🇳' },
-                      ].map(lang => (
-                        <button
-                          key={lang.code}
-                          className={`settings-lang-btn ${appLang === lang.code ? 'active' : ''}`}
-                          onClick={() => changeLanguage(lang.code)}
-                        >
-                          <span className="settings-lang-flag">{lang.flag}</span>
-                          <span>{lang.label}</span>
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                  <div className="settings-section">
                     <label className="settings-section-title">{t('settings.theme')}</label>
                     <div className="settings-theme-options">
-                      <button
-                        className={`settings-theme-btn ${appTheme === 'dark' ? 'active' : ''}`}
-                        onClick={() => changeTheme('dark')}
-                      >
-                        <div className="theme-preview dark-preview">
-                          <div className="theme-preview-bar" />
-                          <div className="theme-preview-content">
-                            <div className="theme-preview-line" />
-                            <div className="theme-preview-line short" />
+                      {[
+                        { id: 'dark', label: t('settings.themeDark') || 'Тёмная', bar: '#0d0d14', bg: '#111118', line: '#1e1e2e' },
+                        { id: 'light', label: t('settings.themeLight') || 'Светлая', bar: '#dde0f0', bg: '#eef0f9', line: '#cdd1e8' },
+                        { id: 'amoled', label: 'AMOLED', bar: '#000000', bg: '#050508', line: '#0a0a10', premium: true },
+                        { id: 'nord', label: 'Nord', bar: '#242933', bg: '#2e3440', line: '#3b4252', premium: true },
+                        { id: 'mocha', label: 'Мокко', bar: '#1e1a18', bg: '#241f1b', line: '#2c2622', premium: true },
+                      ].map(theme => {
+                        const locked = theme.premium && !premiumStatus?.active
+                        return (
+                        <button
+                          key={theme.id}
+                          className={`settings-theme-btn ${appTheme === theme.id ? 'active' : ''} ${locked ? 'locked' : ''}`}
+                          onClick={() => { if (locked) setThemePremiumPrompt(true); else changeTheme(theme.id) }}
+                          title={locked ? '⭐ Требуется подписка' : theme.label}
+                        >
+                          <div className="theme-preview" style={{ background: theme.bar }}>
+                            <div className="theme-preview-bar" style={{ background: theme.bg }} />
+                            <div className="theme-preview-content" style={{ background: theme.bg }}>
+                              <div className="theme-preview-line" style={{ background: theme.line }} />
+                              <div className="theme-preview-line short" style={{ background: theme.line }} />
+                            </div>
+                            {locked && <div className="theme-preview-lock">⭐</div>}
                           </div>
-                        </div>
-                        <span>{t('settings.themeDark')}</span>
-                      </button>
-                      <button
-                        className={`settings-theme-btn ${appTheme === 'light' ? 'active' : ''}`}
-                        onClick={() => changeTheme('light')}
-                      >
-                        <div className="theme-preview light-preview">
-                          <div className="theme-preview-bar" />
-                          <div className="theme-preview-content">
-                            <div className="theme-preview-line" />
-                            <div className="theme-preview-line short" />
-                          </div>
-                        </div>
-                        <span>{t('settings.themeLight')}</span>
-                      </button>
+                          <span>{theme.label}</span>
+                        </button>
+                        )
+                      })}
                     </div>
                   </div>
                   <div className="settings-section">
@@ -5088,10 +6954,453 @@ export default function Chat() {
                   </div>
                 </div>
               )}
+              {settingsTab === 'lang' && (
+                <div className="settings-page">
+                  <h2>Язык и время</h2>
+                  <div className="settings-section">
+                    <label className="settings-section-title">{t('settings.language')}</label>
+                    <div className="settings-lang-select-row">
+                      <select
+                        className="settings-lang-select"
+                        value={appLang}
+                        onChange={e => changeLanguage(e.target.value)}
+                        disabled={langLoading}
+                      >
+                        {LANGUAGES.map(lang => (
+                          <option key={lang.code} value={lang.code}>{lang.flag} {lang.native}</option>
+                        ))}
+                      </select>
+                      {langLoading && <div className="lang-loading-spinner" />}
+                    </div>
+                    {langLoading && <p className="lang-loading-hint">Загрузка перевода...</p>}
+                  </div>
+                  <div className="settings-section">
+                    <label className="settings-section-title">Формат времени</label>
+                    <div className="settings-timeformat-row">
+                      <button
+                        className={`settings-timeformat-btn ${timeFormat === '24' ? 'active' : ''}`}
+                        onClick={() => { localStorage.setItem('appTimeFormat', '24'); setTimeFormat('24') }}
+                      >
+                        24ч <span className="settings-timeformat-example">14:30</span>
+                      </button>
+                      <button
+                        className={`settings-timeformat-btn ${timeFormat === '12' ? 'active' : ''}`}
+                        onClick={() => { localStorage.setItem('appTimeFormat', '12'); setTimeFormat('12') }}
+                      >
+                        12ч <span className="settings-timeformat-example">2:30 PM</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+              {settingsTab === 'privacy' && (
+                <div className="settings-page">
+                  <h2>Конфиденциальность</h2>
+                  <p className="settings-page-desc">Управление данными и конфиденциальностью вашего аккаунта.</p>
+                  <div className="settings-section">
+                    <label className="settings-section-title">Соглашения</label>
+                    <div className="privacy-agreements">
+                      <div className="privacy-agreement-item">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" strokeWidth="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14,2 14,8 20,8"/></svg>
+                        <a href="/terms" target="_blank" rel="noopener noreferrer">Пользовательское соглашение</a>
+                      </div>
+                      <div className="privacy-agreement-item">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" strokeWidth="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
+                        <a href="/privacy" target="_blank" rel="noopener noreferrer">Политика конфиденциальности</a>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="settings-section">
+                    <label className="settings-section-title">Данные аккаунта</label>
+                    <p style={{ fontSize: '.85rem', color: 'var(--text-muted)', marginBottom: 12 }}>
+                      Мы храним только необходимые данные: имя пользователя, email, сообщения. Пароль хранится в зашифрованном виде.
+                    </p>
+                  </div>
+                  <div className="settings-section settings-danger-zone">
+                    <label className="settings-section-title" style={{ color: 'var(--danger)' }}>Опасная зона</label>
+                    <p style={{ fontSize: '.85rem', color: 'var(--text-muted)', marginBottom: 16 }}>
+                      Удаление аккаунта необратимо. Вы будете удалены из всех серверов и списков друзей. Ваши сообщения останутся, но имя будет заменено на «Удалённый пользователь».
+                    </p>
+                    {!privacyDeleteConfirm ? (
+                      <button className="btn-danger" onClick={() => setPrivacyDeleteConfirm(true)}>
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
+                        Удалить аккаунт
+                      </button>
+                    ) : (
+                      <div className="privacy-delete-confirm">
+                        <p style={{ fontSize: '.85rem', color: 'var(--danger)', marginBottom: 8 }}>Для подтверждения введите <b>УДАЛИТЬ</b></p>
+                        <input
+                          type="text"
+                          className="terms-delete-input"
+                          value={privacyDeleteText}
+                          onChange={e => setPrivacyDeleteText(e.target.value)}
+                          placeholder="УДАЛИТЬ"
+                          autoFocus
+                        />
+                        <div className="privacy-delete-actions">
+                          <button
+                            className="btn-danger"
+                            disabled={privacyDeleteText !== 'УДАЛИТЬ' || privacyDeleting}
+                            onClick={async () => {
+                              setPrivacyDeleting(true)
+                              try {
+                                await API('/api/auth/account', { method: 'DELETE' })
+                                logout()
+                              } catch { setPrivacyDeleting(false) }
+                            }}
+                          >
+                            {privacyDeleting ? 'Удаление...' : 'Удалить аккаунт навсегда'}
+                          </button>
+                          <button className="btn-cancel" onClick={() => { setPrivacyDeleteConfirm(false); setPrivacyDeleteText('') }}>Отмена</button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+            {themePremiumPrompt && (
+              <div className="theme-premium-prompt-overlay" onClick={() => setThemePremiumPrompt(false)}>
+                <div className="theme-premium-prompt" onClick={e => e.stopPropagation()}>
+                  <div className="theme-premium-prompt-icon">⭐</div>
+                  <div className="theme-premium-prompt-title">Эксклюзивные темы</div>
+                  <div className="theme-premium-prompt-desc">AMOLED, Nord и Мокко доступны с подпиской Буст. Открой новый облик приложения.</div>
+                  <div className="theme-premium-prompt-actions">
+                    <button className="btn-primary theme-premium-prompt-btn" onClick={() => { setThemePremiumPrompt(false); setShowProfileSettings(false); openShop('subscription') }}>
+                      Смотреть подписки
+                    </button>
+                    <button className="theme-premium-prompt-cancel" onClick={() => setThemePremiumPrompt(false)}>Позже</button>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {avatarCropModal && (() => {
+        // Image base dimensions when rendered with height:100% (300px) in the crop area
+        const baseW = 300 * avatarCropModal.imgEl.width / avatarCropModal.imgEl.height
+        // Minimum scale: image must always cover the 220×220 hole
+        const minScale = Math.max(220 / baseW, 220 / 300)
+        // Max allowed offset at a given scale so image never leaves the hole
+        const maxOX = (s) => baseW * s / 2 - 110
+        const maxOY = (s) => 150 * s - 110
+        const clampOff = (s, ox, oy) => ({
+          x: Math.max(-maxOX(s), Math.min(maxOX(s), ox)),
+          y: Math.max(-maxOY(s), Math.min(maxOY(s), oy)),
+        })
+        // Visual position of image top-left in the 300x300 area
+        const imgVX = 150 + cropOffset.x - baseW * cropScale / 2
+        const imgVY = 150 + cropOffset.y - 150 * cropScale
+        // Preview circle (100x100) maps the 220x220 hole at [40,260]×[40,260]
+        const ps = 100 / 220
+        const previewStyle = {
+          backgroundImage: `url(${avatarCropModal.imgSrc})`,
+          backgroundSize: `${baseW * cropScale * ps}px ${300 * cropScale * ps}px`,
+          backgroundPosition: `${(imgVX - 40) * ps}px ${(imgVY - 40) * ps}px`,
+        }
+        const applyScale = (newS) => {
+          const s = Math.max(minScale, Math.min(3, newS))
+          setCropScale(s)
+          setCropOffset(o => clampOff(s, o.x, o.y))
+        }
+        return (
+          <div className="modal-overlay" onClick={() => setAvatarCropModal(null)}>
+            <div className="modal avatar-crop-modal" onClick={e => e.stopPropagation()}>
+              <h3>Настройка аватара</h3>
+              <p className="avatar-crop-hint">Перетащи и масштабируй изображение</p>
+              <div className="avatar-crop-container">
+                <div className="avatar-crop-area"
+                  onWheel={(e) => { e.preventDefault(); applyScale(cropScale + (e.deltaY > 0 ? -0.08 : 0.08)) }}
+                  onMouseDown={(e) => { e.preventDefault(); cropDrag.current = { active: true, startX: e.clientX, startY: e.clientY, origX: cropOffset.x, origY: cropOffset.y } }}
+                  onMouseMove={(e) => { if (!cropDrag.current.active) return; const d = cropDrag.current; setCropOffset(clampOff(cropScale, d.origX + e.clientX - d.startX, d.origY + e.clientY - d.startY)) }}
+                  onMouseUp={() => { cropDrag.current.active = false }}
+                  onMouseLeave={() => { cropDrag.current.active = false }}
+                  onTouchStart={(e) => { const t = e.touches[0]; cropDrag.current = { active: true, startX: t.clientX, startY: t.clientY, origX: cropOffset.x, origY: cropOffset.y } }}
+                  onTouchMove={(e) => { if (!cropDrag.current.active) return; const t = e.touches[0]; const d = cropDrag.current; setCropOffset(clampOff(cropScale, d.origX + t.clientX - d.startX, d.origY + t.clientY - d.startY)) }}
+                  onTouchEnd={() => { cropDrag.current.active = false }}
+                >
+                  <img
+                    className="avatar-crop-img"
+                    src={avatarCropModal.imgSrc}
+                    alt=""
+                    draggable={false}
+                    style={{ transform: `translate(-50%, -50%) translate(${cropOffset.x}px, ${cropOffset.y}px) scale(${cropScale})` }}
+                  />
+                  <svg className="avatar-crop-mask" viewBox="0 0 300 300" xmlns="http://www.w3.org/2000/svg" style={{ position: 'absolute', inset: 0, width: '100%', height: '100%' }}>
+                    <defs>
+                      <mask id="avatarCropHole">
+                        <rect fill="white" width="300" height="300" />
+                        <circle fill="black" cx="150" cy="150" r="110" />
+                      </mask>
+                    </defs>
+                    <rect fill="rgba(0,0,0,0.65)" width="300" height="300" mask="url(#avatarCropHole)" />
+                    <circle fill="none" stroke="rgba(255,255,255,0.4)" strokeWidth="1.5" cx="150" cy="150" r="110" />
+                  </svg>
+                </div>
+                <div className="avatar-crop-preview">
+                  <div className="avatar-crop-preview-circle" style={previewStyle} />
+                  <span className="avatar-crop-preview-label">Предпросмотр</span>
+                </div>
+              </div>
+              <div className="avatar-crop-zoom">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8"/><line x1="8" y1="11" x2="14" y2="11"/></svg>
+                <input type="range" min={minScale.toFixed(2)} max="3" step="0.02" value={cropScale} onChange={(e) => applyScale(parseFloat(e.target.value))} />
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8"/><line x1="8" y1="11" x2="14" y2="11"/><line x1="11" y1="8" x2="11" y2="14"/></svg>
+              </div>
+              <div className="modal-actions">
+                <button className="btn-cancel" onClick={() => setAvatarCropModal(null)}>Отмена</button>
+                <button className="btn-submit" disabled={avatarUploading} onClick={async () => {
+                  const imgEl = avatarCropModal.imgEl; if (!imgEl) return
+                  setAvatarUploading(true)
+                  try {
+                    const canvas = document.createElement('canvas')
+                    const outSize = 256
+                    canvas.width = outSize; canvas.height = outSize
+                    const ctx = canvas.getContext('2d')
+                    // crop area is 300×300 (matches CSS), hole is 220×220 centered at (40,40)
+                    const baseW = 300 * imgEl.width / imgEl.height
+                    const imgW = baseW * cropScale
+                    const imgH = 300 * cropScale
+                    const imgX = 150 + cropOffset.x - imgW / 2
+                    const imgY = 150 + cropOffset.y - imgH / 2
+                    const srcX = (40 - imgX) / imgW * imgEl.width
+                    const srcY = (40 - imgY) / imgH * imgEl.height
+                    const srcW = 220 / imgW * imgEl.width
+                    const srcH = 220 / imgH * imgEl.height
+                    ctx.beginPath(); ctx.arc(outSize/2, outSize/2, outSize/2, 0, Math.PI*2); ctx.clip()
+                    ctx.drawImage(imgEl, srcX, srcY, srcW, srcH, 0, 0, outSize, outSize)
+                    const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'))
+                    if (!blob) { setAvatarUploading(false); return }
+                    const fd = new FormData()
+                    fd.append('avatar', blob, 'avatar.png')
+                    const token = localStorage.getItem('token') || sessionStorage.getItem('token')
+                    const res = await fetch('/api/auth/avatar', { method: 'POST', headers: { Authorization: 'Bearer ' + token }, body: fd })
+                    const data = await res.json()
+                    if (!res.ok) throw new Error(data.error)
+                    setUser(prev => ({ ...prev, avatar: data.avatar }))
+                    setAvatarCropModal(null)
+                    setAvatarUploading(false)
+                  } catch (err) { setProfileError(err.message); setAvatarUploading(false) }
+                }}>{avatarUploading ? 'Сохранение...' : 'Сохранить'}</button>
+              </div>
+            </div>
+          </div>
+        )
+      })()}
+
+      {bannerCropModal && (() => {
+        // Container 500×150, hole 460×100 at (20,25)
+        const baseW = 150 * bannerCropModal.imgEl.width / bannerCropModal.imgEl.height
+        const minScale = Math.max(460 / baseW, 100 / 150)
+        const maxOX = (s) => Math.max(0, baseW * s / 2 - 230)
+        const maxOY = (s) => Math.max(0, 75 * s - 50)
+        const clamp = (s, ox, oy) => ({
+          x: Math.max(-maxOX(s), Math.min(maxOX(s), ox)),
+          y: Math.max(-maxOY(s), Math.min(maxOY(s), oy)),
+        })
+        const applyScale = (newS) => {
+          const s = Math.max(minScale, Math.min(4, newS))
+          setBannerCropScale(s)
+          setBannerCropOffset(o => clamp(s, o.x, o.y))
+        }
+        return (
+          <div className="modal-overlay" onClick={() => setBannerCropModal(null)}>
+            <div className="modal banner-crop-modal" onClick={e => e.stopPropagation()}>
+              <h3>Настройка баннера</h3>
+              <p className="avatar-crop-hint">Перетащи и масштабируй изображение</p>
+              <div className="banner-crop-area"
+                onWheel={e => { e.preventDefault(); applyScale(bannerCropScale + (e.deltaY > 0 ? -0.08 : 0.08)) }}
+                onMouseDown={e => { e.preventDefault(); bannerCropDrag.current = { active: true, startX: e.clientX, startY: e.clientY, origX: bannerCropOffset.x, origY: bannerCropOffset.y } }}
+                onMouseMove={e => { if (!bannerCropDrag.current.active) return; const d = bannerCropDrag.current; setBannerCropOffset(clamp(bannerCropScale, d.origX + e.clientX - d.startX, d.origY + e.clientY - d.startY)) }}
+                onMouseUp={() => { bannerCropDrag.current.active = false }}
+                onMouseLeave={() => { bannerCropDrag.current.active = false }}
+                onTouchStart={e => { const t = e.touches[0]; bannerCropDrag.current = { active: true, startX: t.clientX, startY: t.clientY, origX: bannerCropOffset.x, origY: bannerCropOffset.y } }}
+                onTouchMove={e => { if (!bannerCropDrag.current.active) return; const t = e.touches[0]; const d = bannerCropDrag.current; setBannerCropOffset(clamp(bannerCropScale, d.origX + t.clientX - d.startX, d.origY + t.clientY - d.startY)) }}
+                onTouchEnd={() => { bannerCropDrag.current.active = false }}
+              >
+                <img
+                  src={bannerCropModal.imgSrc} alt="" draggable={false}
+                  style={{ position:'absolute', top:'50%', left:'50%', height: `${150 * bannerCropScale}px`, width: `${baseW * bannerCropScale}px`, transform: `translate(-50%, -50%) translate(${bannerCropOffset.x}px, ${bannerCropOffset.y}px)`, userSelect:'none', pointerEvents:'none' }}
+                />
+                <svg style={{ position:'absolute', inset:0, width:'100%', height:'100%', pointerEvents:'none' }} viewBox="0 0 500 150">
+                  <defs>
+                    <mask id="bannerCropHole">
+                      <rect fill="white" width="500" height="150" />
+                      <rect fill="black" x="20" y="25" width="460" height="100" rx="4" />
+                    </mask>
+                  </defs>
+                  <rect fill="rgba(0,0,0,0.65)" width="500" height="150" mask="url(#bannerCropHole)" />
+                  <rect fill="none" stroke="rgba(255,255,255,0.4)" strokeWidth="1.5" x="20" y="25" width="460" height="100" rx="4" />
+                </svg>
+              </div>
+              <div className="avatar-crop-zoom">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8"/><line x1="8" y1="11" x2="14" y2="11"/></svg>
+                <input type="range" min={minScale.toFixed(2)} max="4" step="0.02" value={bannerCropScale} onChange={e => applyScale(parseFloat(e.target.value))} />
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8"/><line x1="8" y1="11" x2="14" y2="11"/><line x1="11" y1="8" x2="11" y2="14"/></svg>
+              </div>
+              <div className="modal-actions">
+                <button className="btn-cancel" onClick={() => setBannerCropModal(null)}>Отмена</button>
+                <button className="btn-submit" disabled={bannerUploading} onClick={async () => {
+                  const imgEl = bannerCropModal.imgEl; if (!imgEl) return
+                  setBannerUploading(true)
+                  try {
+                    const canvas = document.createElement('canvas')
+                    canvas.width = 900; canvas.height = 200
+                    const ctx = canvas.getContext('2d')
+                    const bW = baseW * bannerCropScale
+                    const bH = 150 * bannerCropScale
+                    const imgX = 250 + bannerCropOffset.x - bW / 2
+                    const imgY = 75 + bannerCropOffset.y - bH / 2
+                    const srcX = (20 - imgX) / bW * imgEl.width
+                    const srcY = (25 - imgY) / bH * imgEl.height
+                    const srcW = 460 / bW * imgEl.width
+                    const srcH = 100 / bH * imgEl.height
+                    ctx.drawImage(imgEl, srcX, srcY, srcW, srcH, 0, 0, 900, 200)
+                    const blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.92))
+                    const fd = new FormData()
+                    fd.append('banner', blob, 'banner.jpg')
+                    const token = localStorage.getItem('token') || sessionStorage.getItem('token')
+                    const res = await fetch('/api/auth/banner', { method: 'POST', headers: { Authorization: 'Bearer ' + token }, body: fd })
+                    const data = await res.json()
+                    if (!res.ok) throw new Error(data.error)
+                    setProfileForm(f => ({ ...f, bannerImg: data.bannerImg }))
+                    setUser(prev => ({ ...prev, bannerImg: data.bannerImg }))
+                    setBannerCropModal(null)
+                  } catch (err) { setProfileError(err.message) } finally { setBannerUploading(false) }
+                }}>{bannerUploading ? 'Сохранение...' : 'Сохранить'}</button>
+              </div>
+            </div>
+          </div>
+        )
+      })()}
+
+      {showBannerGifPicker && (
+        <div className="modal-overlay" onClick={() => setShowBannerGifPicker(false)}>
+          <div className="modal banner-gif-modal" onClick={e => e.stopPropagation()}>
+            <h3>Выбрать GIF для баннера</h3>
+            <div className="gif-picker-search" style={{ border:'none', padding:'0 0 10px 0' }}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+              <input type="text" placeholder="Поиск GIF..." value={bannerGifSearch} autoFocus
+                onChange={e => { const q = e.target.value; setBannerGifSearch(q); clearTimeout(bannerGifSearchTimer.current); bannerGifSearchTimer.current = setTimeout(() => fetchBannerGifs(q), 400) }} />
+            </div>
+            <div className="gif-picker-grid" style={{ height: 320 }}>
+              {bannerGifLoading ? (
+                <div className="gif-picker-loading"><div className="gif-picker-spinner" /></div>
+              ) : bannerGifResults.map(gif => (
+                <div key={gif.id} className="gif-item" onClick={() => selectBannerGif(gif)}>
+                  <img src={gif.images.fixed_width.url} alt={gif.title} loading="lazy" />
+                </div>
+              ))}
+            </div>
+            <div className="gif-picker-footer" style={{ borderTop:'1px solid var(--border)', padding:'8px 0 0', marginTop:8 }}>
+              <img src="https://developers.giphy.com/branch/master/static/header-logo-8974b8ae658f704a5b48a2d039b8ad93.gif" alt="Powered by GIPHY" className="giphy-logo" />
             </div>
           </div>
         </div>
       )}
+
+      {serverAvatarCropModal && (() => {
+        const baseW = 300 * serverAvatarCropModal.imgEl.width / serverAvatarCropModal.imgEl.height
+        const minScale = Math.max(220 / baseW, 220 / 300)
+        const maxOX = (s) => baseW * s / 2 - 110
+        const maxOY = (s) => 150 * s - 110
+        const clampOff = (s, ox, oy) => ({
+          x: Math.max(-maxOX(s), Math.min(maxOX(s), ox)),
+          y: Math.max(-maxOY(s), Math.min(maxOY(s), oy)),
+        })
+        const imgVX = 150 + serverCropOffset.x - baseW * serverCropScale / 2
+        const imgVY = 150 + serverCropOffset.y - 150 * serverCropScale
+        const ps = 100 / 220
+        const previewStyle = {
+          backgroundImage: `url(${serverAvatarCropModal.imgSrc})`,
+          backgroundSize: `${baseW * serverCropScale * ps}px ${300 * serverCropScale * ps}px`,
+          backgroundPosition: `${(imgVX - 40) * ps}px ${(imgVY - 40) * ps}px`,
+        }
+        const applyScale = (newS) => {
+          const s = Math.max(minScale, Math.min(3, newS))
+          setServerCropScale(s)
+          setServerCropOffset(o => clampOff(s, o.x, o.y))
+        }
+        return (
+          <div className="modal-overlay" style={{ zIndex: 400 }} onClick={() => setServerAvatarCropModal(null)}>
+            <div className="modal avatar-crop-modal" onClick={e => e.stopPropagation()}>
+              <h3>Аватар сервера</h3>
+              <p className="avatar-crop-hint">Перетащи и масштабируй изображение</p>
+              <div className="avatar-crop-container">
+                <div className="avatar-crop-area"
+                  onWheel={(e) => { e.preventDefault(); applyScale(serverCropScale + (e.deltaY > 0 ? -0.08 : 0.08)) }}
+                  onMouseDown={(e) => { e.preventDefault(); serverCropDrag.current = { active: true, startX: e.clientX, startY: e.clientY, origX: serverCropOffset.x, origY: serverCropOffset.y } }}
+                  onMouseMove={(e) => { if (!serverCropDrag.current.active) return; const d = serverCropDrag.current; setServerCropOffset(clampOff(serverCropScale, d.origX + e.clientX - d.startX, d.origY + e.clientY - d.startY)) }}
+                  onMouseUp={() => { serverCropDrag.current.active = false }}
+                  onMouseLeave={() => { serverCropDrag.current.active = false }}
+                  onTouchStart={(e) => { const t = e.touches[0]; serverCropDrag.current = { active: true, startX: t.clientX, startY: t.clientY, origX: serverCropOffset.x, origY: serverCropOffset.y } }}
+                  onTouchMove={(e) => { if (!serverCropDrag.current.active) return; const t = e.touches[0]; const d = serverCropDrag.current; setServerCropOffset(clampOff(serverCropScale, d.origX + t.clientX - d.startX, d.origY + t.clientY - d.startY)) }}
+                  onTouchEnd={() => { serverCropDrag.current.active = false }}
+                >
+                  <img className="avatar-crop-img" src={serverAvatarCropModal.imgSrc} alt="" draggable={false}
+                    style={{ transform: `translate(-50%, -50%) translate(${serverCropOffset.x}px, ${serverCropOffset.y}px) scale(${serverCropScale})` }} />
+                  <svg className="avatar-crop-mask" viewBox="0 0 300 300" xmlns="http://www.w3.org/2000/svg" style={{ position: 'absolute', inset: 0, width: '100%', height: '100%' }}>
+                    <defs>
+                      <mask id="srvCropHole">
+                        <rect fill="white" width="300" height="300" />
+                        <rect fill="black" x="40" y="40" width="220" height="220" rx="16" ry="16" />
+                      </mask>
+                    </defs>
+                    <rect fill="rgba(0,0,0,0.65)" width="300" height="300" mask="url(#srvCropHole)" />
+                    <rect fill="none" stroke="rgba(255,255,255,0.4)" strokeWidth="1.5" x="40" y="40" width="220" height="220" rx="16" ry="16" />
+                  </svg>
+                </div>
+                <div className="avatar-crop-preview">
+                  <div className="srv-crop-preview-square" style={previewStyle} />
+                  <span className="avatar-crop-preview-label">Предпросмотр</span>
+                </div>
+              </div>
+              <div className="avatar-crop-zoom">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8"/><line x1="8" y1="11" x2="14" y2="11"/></svg>
+                <input type="range" min={minScale.toFixed(2)} max="3" step="0.02" value={serverCropScale} onChange={(e) => applyScale(parseFloat(e.target.value))} />
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8"/><line x1="8" y1="11" x2="14" y2="11"/><line x1="11" y1="8" x2="11" y2="14"/></svg>
+              </div>
+              <div className="modal-actions">
+                <button className="btn-cancel" onClick={() => setServerAvatarCropModal(null)}>Отмена</button>
+                <button className="btn-submit" disabled={serverAvatarUploading} onClick={async () => {
+                  const imgEl = serverAvatarCropModal.imgEl; if (!imgEl) return
+                  setServerAvatarUploading(true)
+                  try {
+                    const canvas = document.createElement('canvas')
+                    const outSize = 256
+                    canvas.width = outSize; canvas.height = outSize
+                    const ctx = canvas.getContext('2d')
+                    const baseW = 300 * imgEl.width / imgEl.height
+                    const imgW = baseW * serverCropScale
+                    const imgH = 300 * serverCropScale
+                    const imgX = 150 + serverCropOffset.x - imgW / 2
+                    const imgY = 150 + serverCropOffset.y - imgH / 2
+                    const srcX = (40 - imgX) / imgW * imgEl.width
+                    const srcY = (40 - imgY) / imgH * imgEl.height
+                    const srcW = 220 / imgW * imgEl.width
+                    const srcH = 220 / imgH * imgEl.height
+                    ctx.drawImage(imgEl, srcX, srcY, srcW, srcH, 0, 0, outSize, outSize)
+                    const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'))
+                    if (!blob) { setServerAvatarUploading(false); return }
+                    const fd = new FormData()
+                    fd.append('avatar', blob, 'avatar.png')
+                    const token = localStorage.getItem('token') || sessionStorage.getItem('token')
+                    const res = await fetch(`/api/servers/${activeServer.id}/avatar`, { method: 'POST', headers: { Authorization: 'Bearer ' + token }, body: fd })
+                    const data = await res.json()
+                    if (!res.ok) throw new Error(data.error)
+                    setServers(prev => prev.map(s => s.id === activeServer.id ? { ...s, avatar: data.avatar } : s))
+                    setActiveServer(prev => prev ? { ...prev, avatar: data.avatar } : prev)
+                    setServerAvatarCropModal(null)
+                    setServerAvatarUploading(false)
+                  } catch { setServerAvatarUploading(false) }
+                }}>{serverAvatarUploading ? 'Сохранение...' : 'Сохранить'}</button>
+              </div>
+            </div>
+          </div>
+        )
+      })()}
 
       {showUploadDialog && uploadFileObj && (
         <div className="modal-overlay" onClick={closeUploadDialog}>
@@ -5252,11 +7561,59 @@ export default function Chat() {
                     {t('serverSettings.permissions')}
                   </button>
                 )}
+                {isOwner && (
+                  <button className={`settings-nav-item ${serverSettingsTab === 'emojis' ? 'active' : ''}`} onClick={() => setServerSettingsTab('emojis')}>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/></svg>
+                    Эмодзи
+                    {(activeServer.boostLevel > 0) && <span className="nav-badge-boost">🔥</span>}
+                  </button>
+                )}
               </div>
               <div className="settings-content">
                 {serverSettingsTab === 'general' && (
                   <div>
                     <h3>{t('serverSettings.generalTitle')}</h3>
+                    {isOwner && (
+                      <div className="srv-avatar-settings-row" style={{ marginBottom: 20 }}>
+                        <div className="srv-settings-avatar-wrap" onClick={() => document.getElementById('srv-avatar-input').click()} title="Сменить аватар сервера">
+                          {activeServer.avatar
+                            ? <img src={activeServer.avatar} alt="" className="srv-settings-avatar-img" />
+                            : <span className="srv-settings-avatar-text">{activeServer.iconText}</span>}
+                          <div className="srv-settings-avatar-overlay"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2"><path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z"/><circle cx="12" cy="13" r="4"/></svg></div>
+                          <input id="srv-avatar-input" type="file" accept="image/*" style={{ display: 'none' }} onChange={e => {
+                            const file = e.target.files?.[0]
+                            if (!file) return
+                            if (file.size > 10 * 1024 * 1024) return
+                            const reader = new FileReader()
+                            reader.onload = () => {
+                              const img = new Image()
+                              img.onload = () => {
+                                const bW = 300 * img.width / img.height
+                                const initScale = Math.max(1, 220 / bW, 220 / 300)
+                                setServerCropScale(initScale); setServerCropOffset({ x: 0, y: 0 })
+                                setServerAvatarCropModal({ imgSrc: reader.result, imgEl: img })
+                              }
+                              img.src = reader.result
+                            }
+                            reader.readAsDataURL(file)
+                            e.target.value = ''
+                          }} />
+                        </div>
+                        <div className="srv-settings-avatar-info">
+                          <span style={{ fontWeight: 600, fontSize: '.9rem' }}>Аватар сервера</span>
+                          <span style={{ fontSize: '.8rem', color: 'var(--text-muted)' }}>PNG, JPG до 10 МБ</span>
+                          {activeServer.avatar && (
+                            <button type="button" className="profile-avatar-remove" onClick={async () => {
+                              try {
+                                await API(`/api/servers/${activeServer.id}/avatar`, { method: 'DELETE' })
+                                setServers(prev => prev.map(s => s.id === activeServer.id ? { ...s, avatar: null } : s))
+                                setActiveServer(prev => prev ? { ...prev, avatar: null } : prev)
+                              } catch {}
+                            }}>Удалить аватар</button>
+                          )}
+                        </div>
+                      </div>
+                    )}
                     <form onSubmit={async (e) => {
                       e.preventDefault()
                       try {
@@ -5283,6 +7640,49 @@ export default function Chat() {
                       </div>
                       {isOwner && <div className="modal-actions"><button type="submit" className="btn-submit">{t('common.save')}</button></div>}
                     </form>
+
+                    {/* Boost level block */}
+                    {(() => {
+                      const lvl = activeServer.boostLevel ?? 0
+                      const cnt = activeServer.boostCount ?? 0
+                      const thresholds = [0, 5, 15, 30]
+                      const nextThreshold = thresholds[lvl + 1] ?? 30
+                      const prevThreshold = thresholds[lvl] ?? 0
+                      const progress = lvl >= 3 ? 100 : Math.round((cnt - prevThreshold) / (nextThreshold - prevThreshold) * 100)
+                      const levelColors = ['#64748b', '#f59e0b', '#a855f7', '#ec4899']
+                      const levelNames = ['Нет', 'Уровень 1', 'Уровень 2', 'Уровень 3']
+                      return (
+                        <div className="srv-boost-section">
+                          <div className="srv-boost-header">
+                            <span className="srv-boost-title">🔥 Буст сервера</span>
+                            <span className="srv-boost-level-badge" style={{ background: levelColors[lvl] }}>
+                              {levelNames[lvl]}
+                            </span>
+                          </div>
+                          <div className="srv-boost-bar-wrap">
+                            <div className="srv-boost-bar">
+                              <div className="srv-boost-bar-fill" style={{ width: `${progress}%`, background: levelColors[Math.min(lvl + 1, 3)] }} />
+                            </div>
+                            <span className="srv-boost-bar-label">
+                              {lvl >= 3 ? `${cnt} голосов — максимальный уровень! 🎉` : `${cnt} / ${nextThreshold} голосов до Уровня ${lvl + 1}`}
+                            </span>
+                          </div>
+                          <div className="srv-boost-perks">
+                            {[
+                              { lvl: 1, perks: ['Кастомные эмодзи', 'Голосовые каналы 720p'] },
+                              { lvl: 2, perks: ['Больше слотов эмодзи', 'Голос 1080p', 'Баннер сервера'] },
+                              { lvl: 3, perks: ['Максимум эмодзи', 'Голос 1440p (2K)', 'Кастомный URL сервера'] },
+                            ].map(({ lvl: pl, perks }) => (
+                              <div key={pl} className={`srv-boost-perk-row ${lvl >= pl ? 'unlocked' : 'locked'}`}>
+                                <span className="srv-boost-perk-lvl" style={{ color: levelColors[pl] }}>{'🔥'.repeat(pl)}</span>
+                                <span className="srv-boost-perk-list">{perks.join(' · ')}</span>
+                                {lvl >= pl && <span className="srv-boost-perk-check">✓</span>}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )
+                    })()}
                   </div>
                 )}
                 {serverSettingsTab === 'members' && (
@@ -5299,26 +7699,41 @@ export default function Chat() {
                         const roleName = mRole === 'owner' ? t('role.owner') : mRole === 'admin' ? t('role.admin') : customRole ? customRole.name : t('role.member')
                         return (
                           <div key={m.id} className="srv-member-row">
-                            <div className="srv-member-avatar" style={{ background: m.avatarColor }}>{m.username[0].toUpperCase()}</div>
+                            <div className="srv-member-avatar" style={{ background: m.avatarColor }}><AImg src={m.avatar} />{m.username[0].toUpperCase()}</div>
                             <div className="srv-member-info">
-                              <span className="srv-member-name">{m.username}<span className="user-tag">#{m.tag || '0000'}</span></span>
+                              <span className="srv-member-name" style={{ color: getMemberRoleColor(m.id) || undefined }}>{m.username}<span className="user-tag">#{m.tag || '0000'}</span></span>
                               <span className={`role-badge role-${mRole}`} style={customRole ? { color: customRole.color } : undefined}>{roleName}</span>
                             </div>
                             {canManageRoles && m.id !== user.id && mRole !== 'owner' && (
-                              <div className="srv-member-actions" style={{ flexWrap: 'wrap', gap: 4 }}>
-                                {['user', 'admin', ...(activeServer.customRoles || []).map(r => r.id)].map(r => {
-                                  const cr = (activeServer.customRoles || []).find(cr => cr.id === r)
-                                  const label = r === 'admin' ? t('role.admin') : r === 'user' ? t('role.member') : cr?.name
-                                  return (
-                                    <button key={r} className={`srv-role-btn ${mRole === r ? 'active-role-' + (r === 'admin' ? 'admin' : r === 'user' ? 'user' : 'custom') : ''}`} style={cr && mRole === r ? { background: cr.color, borderColor: cr.color, color: '#fff' } : cr ? { borderColor: cr.color, color: cr.color } : undefined} onClick={async () => {
-                                      if (mRole === r) return
-                                      try {
-                                        await API(`/api/servers/${activeServer.id}/members/${m.id}/role`, { method: 'POST', body: JSON.stringify({ role: r }) })
-                                        setMembers(prev => prev.map(mm => mm.id === m.id ? { ...mm, role: r } : mm))
-                                      } catch {}
-                                    }}>{label}</button>
-                                  )
-                                })}
+                              <div className="srv-role-selector">
+                                <button type="button" className="srv-role-current" style={customRole ? { borderColor: customRole.color, color: customRole.color } : undefined} onClick={() => setRoleAssignMember(prev => prev === m.id ? null : m.id)}>
+                                  {roleName}
+                                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+                                </button>
+                                {roleAssignMember === m.id && (
+                                  <>
+                                    <div className="srv-role-dropdown-backdrop" onClick={() => setRoleAssignMember(null)} />
+                                    <div className="srv-role-dropdown">
+                                      {['user', 'admin', ...(activeServer.customRoles || []).map(r => r.id)].map(r => {
+                                        const cr = (activeServer.customRoles || []).find(cr => cr.id === r)
+                                        const label = r === 'admin' ? t('role.admin') : r === 'user' ? t('role.member') : cr?.name
+                                        return (
+                                          <button key={r} type="button" className={`srv-role-option ${mRole === r ? 'active' : ''}`} style={cr ? { color: cr.color } : undefined} onClick={async () => {
+                                            setRoleAssignMember(null)
+                                            if (mRole === r) return
+                                            try {
+                                              await API(`/api/servers/${activeServer.id}/members/${m.id}/role`, { method: 'POST', body: JSON.stringify({ role: r }) })
+                                              setMembers(prev => prev.map(mm => mm.id === m.id ? { ...mm, role: r } : mm))
+                                            } catch {}
+                                          }}>
+                                            {mRole === r && <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>}
+                                            {label}
+                                          </button>
+                                        )
+                                      })}
+                                    </div>
+                                  </>
+                                )}
                               </div>
                             )}
                           </div>
@@ -5405,13 +7820,11 @@ export default function Chat() {
                           <button className="btn-submit" disabled={!editingRole.name.trim()} onClick={async () => {
                             try {
                               if (editingRole.id) {
-                                const updated = await API(`/api/servers/${activeServer.id}/roles/${editingRole.id}`, { method: 'PUT', body: JSON.stringify({ name: editingRole.name, permissions: editingRole.permissions, color: editingRole.color }) })
-                                setActiveServer(prev => prev ? { ...prev, customRoles: (prev.customRoles || []).map(r => r.id === updated.id ? updated : r) } : prev)
-                                setServers(prev => prev.map(s => s.id === activeServer.id ? { ...s, customRoles: (s.customRoles || []).map(r => r.id === updated.id ? updated : r) } : s))
+                                await API(`/api/servers/${activeServer.id}/roles/${editingRole.id}`, { method: 'PUT', body: JSON.stringify({ name: editingRole.name, permissions: editingRole.permissions, color: editingRole.color }) })
+                                // Role list will be updated via server-roles-updated socket event
                               } else {
-                                const created = await API(`/api/servers/${activeServer.id}/roles`, { method: 'POST', body: JSON.stringify({ name: editingRole.name, permissions: editingRole.permissions, color: editingRole.color }) })
-                                setActiveServer(prev => prev ? { ...prev, customRoles: [...(prev.customRoles || []), created] } : prev)
-                                setServers(prev => prev.map(s => s.id === activeServer.id ? { ...s, customRoles: [...(s.customRoles || []), created] } : s))
+                                await API(`/api/servers/${activeServer.id}/roles`, { method: 'POST', body: JSON.stringify({ name: editingRole.name, permissions: editingRole.permissions, color: editingRole.color }) })
+                                // Role list will be updated via server-roles-updated socket event
                               }
                             } catch {}
                             setEditingRole(null)
@@ -5421,6 +7834,109 @@ export default function Chat() {
                     )}
                   </div>
                 )}
+                {serverSettingsTab === 'emojis' && isOwner && (() => {
+                  const lvl = activeServer.boostLevel ?? 0
+                  const limits = [0, 10, 25, 50]
+                  const limit = limits[lvl]
+                  const usedCount = serverSettingsEmojis.length
+                  return (
+                    <div>
+                      <h3>Кастомные эмодзи</h3>
+                      {lvl === 0 ? (
+                        <div className="emojis-locked">
+                          <div className="emojis-locked-icon">🔒</div>
+                          <div className="emojis-locked-title">Нужен Буст Уровня 1</div>
+                          <div className="emojis-locked-desc">Кастомные эмодзи разблокируются при 5+ голосах (Уровень 1). Текущий уровень сервера: 0.</div>
+                        </div>
+                      ) : (
+                        <>
+                          <div className="emojis-info">
+                            <span>Слоты: <strong>{usedCount}/{limit}</strong></span>
+                            <span style={{ color: 'var(--text-muted)', fontSize: '.8rem' }}>🔥 Уровень {lvl} — {limit} эмодзи</span>
+                          </div>
+                          {usedCount < limit && (
+                            <div className="emoji-upload-row">
+                              <input
+                                ref={emojiUploadRef}
+                                type="file"
+                                accept="image/png,image/gif,image/webp,image/jpeg"
+                                style={{ display: 'none' }}
+                                onChange={async e => {
+                                  const file = e.target.files?.[0]
+                                  if (!file) return
+                                  if (!emojiUploadName.trim() || !/^[a-zA-Z0-9_]{2,32}$/.test(emojiUploadName.trim())) {
+                                    alert('Введи корректное имя (2-32 символа, только буквы, цифры, _)')
+                                    e.target.value = ''
+                                    return
+                                  }
+                                  setEmojiUploading(true)
+                                  try {
+                                    const fd = new FormData()
+                                    fd.append('image', file)
+                                    fd.append('name', emojiUploadName.trim())
+                                    const res = await fetch(`/api/servers/${activeServer.id}/emojis`, {
+                                      method: 'POST',
+                                      headers: { Authorization: 'Bearer ' + localStorage.getItem('token') },
+                                      body: fd
+                                    })
+                                    if (!res.ok) { const err = await res.json(); alert(err.error); return }
+                                    const emoji = await res.json()
+                                    setServerSettingsEmojis(prev => [...prev, emoji])
+                                    setServerCustomEmojis(prev => [...prev, emoji])
+                                    setEmojiUploadName('')
+                                  } catch (err) { alert(err.message) }
+                                  finally { setEmojiUploading(false); e.target.value = '' }
+                                }}
+                              />
+                              <input
+                                type="text"
+                                className="emoji-name-input"
+                                placeholder="Имя эмодзи (a-z, 0-9, _)"
+                                value={emojiUploadName}
+                                onChange={e => setEmojiUploadName(e.target.value.replace(/[^a-zA-Z0-9_]/g, ''))}
+                                maxLength={32}
+                              />
+                              <button
+                                type="button"
+                                className="btn-submit emoji-upload-btn"
+                                disabled={emojiUploading || !emojiUploadName.trim()}
+                                onClick={() => emojiUploadRef.current?.click()}
+                              >
+                                {emojiUploading ? 'Загрузка...' : '+ Добавить'}
+                              </button>
+                            </div>
+                          )}
+                          <div className="srv-emojis-grid">
+                            {serverSettingsEmojis.length === 0 && (
+                              <div style={{ color: 'var(--text-muted)', fontSize: '.85rem', padding: '12px 0' }}>Эмодзи ещё не добавлены. Загрузи первый!</div>
+                            )}
+                            {serverSettingsEmojis.map(emoji => (
+                              <div key={emoji.id} className="srv-emoji-item">
+                                <img src={emoji.url} alt={emoji.name} className="srv-emoji-item-img" />
+                                <span className="srv-emoji-item-name">:{emoji.name}:</span>
+                                <button
+                                  type="button"
+                                  className="srv-emoji-item-del"
+                                  title="Удалить"
+                                  onClick={async () => {
+                                    try {
+                                      await API(`/api/servers/${activeServer.id}/emojis/${emoji.id}`, { method: 'DELETE' })
+                                      setServerSettingsEmojis(prev => prev.filter(e => e.id !== emoji.id))
+                                      setServerCustomEmojis(prev => prev.filter(e => e.id !== emoji.id))
+                                    } catch {}
+                                  }}
+                                >
+                                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  )
+                })()}
+
                 {serverSettingsTab === 'permissions' && isOwner && (
                   <div>
                     <h3>{t('serverSettings.permissionsTitle')}</h3>
@@ -5512,7 +8028,7 @@ export default function Chat() {
                             if (e.target.checked) setChAllowedUsers(prev => [...prev, m.id])
                             else setChAllowedUsers(prev => prev.filter(id => id !== m.id))
                           }} />
-                          <div className="perm-user-avatar" style={{ background: m.avatarColor }}>{m.username[0].toUpperCase()}</div>
+                          <div className="perm-user-avatar" style={{ background: m.avatarColor }}><AImg src={m.avatar} />{m.username[0].toUpperCase()}</div>
                           <span>{m.username}</span>
                         </label>
                       ))}
@@ -5610,6 +8126,7 @@ export default function Chat() {
                 <div key={f.id} className="invite-friend-item">
                   <div className="invite-friend-left">
                     <div className="member-avatar" style={{ background: f.avatarColor }}>
+                      <AImg src={f.avatar} />
                       {f.username[0].toUpperCase()}
                       <div className={`status-dot ${f.status}`} />
                     </div>
@@ -5653,6 +8170,7 @@ export default function Chat() {
                 <div key={f.id} className="invite-friend-item">
                   <div className="invite-friend-left">
                     <div className="member-avatar" style={{ background: f.avatarColor }}>
+                      <AImg src={f.avatar} />
                       {f.username[0].toUpperCase()}
                       <div className={`status-dot ${f.status}`} />
                     </div>
@@ -5701,7 +8219,7 @@ export default function Chat() {
           <div className="reaction-users-list">
             {reactionUsersPopup.users.map(u => (
               <div key={u.id} className="reaction-user-item">
-                <div className="reaction-user-avatar" style={{ background: u.avatarColor }}>{u.username[0]?.toUpperCase()}</div>
+                <div className="reaction-user-avatar" style={{ background: u.avatarColor }}><AImg src={u.avatar} />{u.username[0]?.toUpperCase()}</div>
                 <span className="reaction-user-name">{u.username}</span>
               </div>
             ))}
@@ -5746,7 +8264,7 @@ export default function Chat() {
             }
             removeToast(toast.id)
           }}>
-            <div className="toast-avatar" style={{ background: toast.avatarColor }}>{toast.username[0].toUpperCase()}</div>
+            <div className="toast-avatar" style={{ background: toast.avatarColor }}><AImg src={toast.avatar} />{toast.username[0].toUpperCase()}</div>
             <div className="toast-body">
               {toast.type === 'channel' && toast.serverName && (
                 <span className="toast-location">{toast.serverName} › #{toast.channelName}</span>
@@ -5805,15 +8323,112 @@ export default function Chat() {
         </button>
         <button className={`mobile-nav-tab ${mobileTab === 'profile' ? 'active' : ''}`} onClick={() => { setMobileTab('profile'); setShowProfileSettings(true) }}>
           <div className="mobile-nav-avatar" style={{ background: user.avatarColor }}>
+            <AImg src={user.avatar} />
             {user.username?.[0]?.toUpperCase()}
           </div>
           <span>{t('nav.profile') || 'Вы'}</span>
         </button>
       </div>
 
+      {/* Terms agreement popup for existing users */}
+      {showTermsPopup && (
+        <div className="terms-popup-overlay">
+          <div className="terms-popup">
+            {!showDeleteConfirm ? (
+              <>
+                <h2>Пользовательское соглашение</h2>
+                <p>Для продолжения использования сервиса необходимо принять <a href="/terms" target="_blank" rel="noopener noreferrer">Пользовательское соглашение</a> и <a href="/privacy" target="_blank" rel="noopener noreferrer">Политику конфиденциальности</a>.</p>
+                <div className="terms-popup-actions">
+                  <button className="btn-submit" onClick={async () => {
+                    try {
+                      await API('/api/auth/agree-terms', { method: 'POST' })
+                      setUser(prev => ({ ...prev, agreedToTerms: true }))
+                      setShowTermsPopup(false)
+                    } catch {}
+                  }}>Принимаю</button>
+                  <button className="btn-cancel" onClick={() => setShowDeleteConfirm(true)}>Не принимаю</button>
+                </div>
+              </>
+            ) : (
+              <>
+                <h2>Удаление аккаунта</h2>
+                <p>Без принятия соглашения использование сервиса невозможно. Вы можете удалить свой аккаунт — это действие необратимо.</p>
+                <p style={{ marginTop: 12, fontSize: '.85rem', color: 'var(--text-muted)' }}>Для подтверждения введите <b>УДАЛИТЬ</b></p>
+                <input
+                  type="text"
+                  className="terms-delete-input"
+                  value={deleteConfirmText}
+                  onChange={e => setDeleteConfirmText(e.target.value)}
+                  placeholder="УДАЛИТЬ"
+                  autoFocus
+                />
+                <div className="terms-popup-actions">
+                  <button className="btn-cancel" style={{ color: 'var(--danger)', borderColor: 'var(--danger)' }} disabled={deleteConfirmText !== 'УДАЛИТЬ'} onClick={async () => {
+                    try {
+                      await API('/api/auth/account', { method: 'DELETE' })
+                      logout()
+                    } catch {}
+                  }}>Удалить аккаунт навсегда</button>
+                  <button className="btn-cancel" onClick={() => { setShowDeleteConfirm(false); setDeleteConfirmText('') }}>Назад</button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Incoming DM call popup */}
+      {incomingDmCall && (
+        <div className="dm-incoming-call-overlay">
+          <div className="dm-incoming-call-popup">
+            <div className="dm-incoming-call-avatar" style={{ background: incomingDmCall.caller.avatarColor }}>
+              <AImg src={incomingDmCall.caller.avatar} />
+              {incomingDmCall.caller.username[0].toUpperCase()}
+            </div>
+            <div className="dm-incoming-call-info">
+              <span className="dm-incoming-call-name">{incomingDmCall.caller.username}</span>
+              <span className="dm-incoming-call-label">Входящий звонок...</span>
+            </div>
+            <div className="dm-incoming-call-actions">
+              <button className="dm-incoming-reject" onClick={() => rejectDmCall(incomingDmCall.dmChannelId)}>
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M12 9c-1.6 0-3.15.25-4.6.72v3.1c0 .39-.23.74-.56.9-.98.49-1.87 1.12-2.66 1.85-.18.18-.43.28-.7.28-.28 0-.53-.11-.71-.29L.29 13.08a.956.956 0 010-1.36C3.09 8.98 7.27 7 12 7s8.91 1.98 11.71 4.72c.18.18.29.44.29.71 0 .28-.11.53-.29.71l-2.48 2.48c-.18.18-.43.29-.71.29-.27 0-.52-.11-.7-.28a11.27 11.27 0 00-2.67-1.85.996.996 0 01-.56-.9v-3.1C15.15 9.25 13.6 9 12 9z"/></svg>
+              </button>
+              <button className="dm-incoming-accept" onClick={() => acceptDmCall(incomingDmCall.dmChannelId, incomingDmCall.caller)}>
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07 19.5 19.5 0 01-6-6 19.79 19.79 0 01-3.07-8.67A2 2 0 014.11 2h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L8.09 9.91a16 16 0 006 6l1.27-1.27a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0122 16.92z"/></svg>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Hidden container for WebRTC audio elements — positioned off-screen instead of display:none so browsers still play audio */}
       <div id="voice-audio-container" style={{ position: 'fixed', top: '-9999px', left: '-9999px', opacity: 0, pointerEvents: 'none' }} />
       {copyTooltip && <div className="copy-toast" style={{ left: copyTooltip.x, top: copyTooltip.y }}>{t('common.copied')}</div>}
+      {/* Server drag ghost */}
+      {srvDragState && (() => {
+        const s = servers.find(x => x.id === srvDragState.id)
+        const folderItem = effectiveLayout.find(item => item.type === 'folder' && item.folderId === srvDragState.id)
+        return (
+          <div className="srv-drag-ghost" style={{ left: srvDragPos.x - 24, top: srvDragPos.y - 24 }}>
+            {folderItem ? (
+              <div className="folder-mini-grid">
+                {folderItem.serverIds.slice(0, 4).map(id => {
+                  const fs = servers.find(x => x.id === id)
+                  if (!fs) return null
+                  return (
+                    <div key={id} className="folder-mini-cell" style={{ background: fs.avatarColor }}>
+                      {fs.avatar ? <img src={fs.avatar} className="folder-mini-img" alt="" /> : <span>{fs.iconText}</span>}
+                    </div>
+                  )
+                })}
+              </div>
+            ) : s ? (
+              s.avatar ? <img src={s.avatar} alt={s.name} className="server-icon-avatar" /> : <span>{s.iconText}</span>
+            ) : null}
+          </div>
+        )
+      })()}
+
       {voiceUserCtx && (
         <div className="voice-user-ctx-overlay" onClick={() => setVoiceUserCtx(null)} onContextMenu={e => { e.preventDefault(); setVoiceUserCtx(null) }}>
           <div className="voice-user-ctx" ref={voiceUserCtxRef} style={{ top: voiceUserCtx.y, left: voiceUserCtx.x }} onClick={e => e.stopPropagation()}>

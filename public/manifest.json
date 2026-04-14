@@ -1,7 +1,7 @@
 {
-  "name": "Branch — Chat & Voice",
-  "short_name": "Branch",
-  "description": "Branch — Chat & Voice",
+  "name": "Буст — Чат",
+  "short_name": "Буст",
+  "description": "Буст — Чат",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

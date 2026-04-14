@@ -43,7 +43,7 @@ function genCaptchaId() { return 'cap_' + Date.now() + '_' + Math.random().toStr
 
 async function sendEmail(to, subject, html) {
   if (mailTransporter) {
-    const info = await mailTransporter.sendMail({ from: '"Branch App" <noreply@branch.app>', to, subject, html });
+    const info = await mailTransporter.sendMail({ from: '"Буст" <noreply@boost.app>', to, subject, html });
     const previewUrl = nodemailer.getTestMessageUrl(info);
     if (previewUrl) console.log('📧 Preview:', previewUrl);
     return true;
@@ -102,7 +102,7 @@ function initDB() {
   const db = {
     users: [],
     servers: [
-      { id: 's1', name: 'Branch HQ', iconText: 'BH', ownerId: 'system', createdAt: now },
+      { id: 's1', name: 'Буст HQ', iconText: 'BH', ownerId: 'system', createdAt: now },
       { id: 's2', name: 'Gaming Zone', iconText: 'GZ', ownerId: 'system', createdAt: now },
       { id: 's3', name: 'Music Lounge', iconText: 'ML', ownerId: 'system', createdAt: now },
     ],
@@ -128,6 +128,44 @@ let db = loadDB();
 if (!db.friendRequests) { db.friendRequests = []; saveDB(); }
 if (!db.dmChannels) { db.dmChannels = []; saveDB(); }
 if (!db.dmMessages) { db.dmMessages = []; saveDB(); }
+
+// ── Premium: migrate existing data ──
+let premiumDirty = false;
+db.users.forEach(u => {
+  if (u.premium === undefined) { u.premium = null; premiumDirty = true; }
+  if (u.premiumExpiry === undefined) { u.premiumExpiry = null; premiumDirty = true; }
+  if (u.boostCredits === undefined) { u.boostCredits = 0; premiumDirty = true; }
+  if (u.boostedServers === undefined) { u.boostedServers = []; premiumDirty = true; }
+  if (u.statusEmoji === undefined) { u.statusEmoji = null; premiumDirty = true; }
+  if (u.avatarFrame === undefined) { u.avatarFrame = null; premiumDirty = true; }
+});
+db.servers.forEach(s => {
+  if (s.boostCount === undefined) { s.boostCount = 0; premiumDirty = true; }
+  if (s.boostLevel === undefined) { s.boostLevel = 0; premiumDirty = true; }
+  if (s.customEmojis === undefined) { s.customEmojis = []; premiumDirty = true; }
+});
+if (premiumDirty) saveDB();
+
+// Helper: recalculate server boost level
+function recalcBoostLevel(server) {
+  const count = server.boostCount || 0;
+  if (count >= 30) server.boostLevel = 3;
+  else if (count >= 15) server.boostLevel = 2;
+  else if (count >= 5) server.boostLevel = 1;
+  else server.boostLevel = 0;
+}
+
+// Helper: get boost credits by tier
+const PREMIUM_PLANS = {
+  standard: { boostCredits: 2, price: 99, label: 'Стандарт' },
+  pro:      { boostCredits: 8, price: 249, label: 'Про' },
+};
+
+// Helper: check if premium is active
+function isPremiumActive(user) {
+  if (!user.premium || !user.premiumExpiry) return false;
+  return new Date(user.premiumExpiry) > new Date();
+}
 
 function genId() {
   db.nextId++;
@@ -162,7 +200,11 @@ app.use(express.static(join(__dirname, 'public')));
 // Serve built frontend in production
 const distDir = join(__dirname, 'dist');
 if (existsSync(distDir)) {
-  app.use(express.static(distDir));
+  app.use(express.static(distDir, { setHeaders: (res, filePath) => {
+    if (filePath.endsWith('index.html')) {
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    }
+  }}));
 }
 
 const storage = multer.diskStorage({
@@ -249,7 +291,7 @@ app.post('/api/auth/register/send-code', async (req, res) => {
 
   const code = genCode();
   verificationCodes.set(email, { code, expiresAt: Date.now() + 10 * 60 * 1000, username, password });
-  const sent = await sendEmail(email, 'Branch — Verification Code', `<h2>Your verification code</h2><p style="font-size:32px;font-weight:bold;letter-spacing:8px;color:#7c5cfc">${code}</p><p>Valid for 10 minutes.</p>`);
+  const sent = await sendEmail(email, 'Буст — Код подтверждения', `<h2>Your verification code</h2><p style="font-size:32px;font-weight:bold;letter-spacing:8px;color:#7c5cfc">${code}</p><p>Valid for 10 minutes.</p>`);
   console.log(`📧 Verification code for ${email}: ${code}`);
   const response = { ok: true, message: sent ? 'Code sent to email' : 'Check code below' };
   if (DEV_MODE) response.code = code;
@@ -274,7 +316,7 @@ app.post('/api/auth/register/verify', async (req, res) => {
   const passwordHash = await bcrypt.hash(entry.password, 10);
   const avatarColor = COLORS[Math.floor(Math.random() * COLORS.length)];
   const tag = genTag();
-  const user = { id, username: entry.username, email, passwordHash, avatarColor, tag, status: 'online', bio: '', createdAt: new Date().toISOString(), verified: true };
+  const user = { id, username: entry.username, email, passwordHash, avatarColor, tag, status: 'online', bio: '', createdAt: new Date().toISOString(), verified: true, agreedToTerms: true, agreedAt: new Date().toISOString() };
   db.users.push(user);
   // Auto-join official server(s)
   const officialServerId = 's1';
@@ -284,7 +326,7 @@ app.post('/api/auth/register/verify', async (req, res) => {
   }
   saveDB();
   const token = jwt.sign({ id }, JWT_SECRET, { expiresIn: '7d' });
-  res.json({ token, user: { id, username: entry.username, email, avatarColor, tag, status: 'online', bio: '' } });
+  res.json({ token, user: { id, username: entry.username, email, avatarColor, avatar: null, tag, status: 'online', bio: '', agreedToTerms: true } });
 });
 
 // Legacy register (fallback)
@@ -299,7 +341,7 @@ app.post('/api/auth/register', async (req, res) => {
   const passwordHash = await bcrypt.hash(password, 10);
   const avatarColor = COLORS[Math.floor(Math.random() * COLORS.length)];
   const tag = genTag();
-  const user = { id, username, email, passwordHash, avatarColor, tag, status: 'online', bio: '', createdAt: new Date().toISOString() };
+  const user = { id, username, email, passwordHash, avatarColor, tag, status: 'online', bio: '', createdAt: new Date().toISOString(), agreedToTerms: true, agreedAt: new Date().toISOString() };
   db.users.push(user);
   // Auto-join official server(s)
   const officialServerId = 's1';
@@ -309,7 +351,7 @@ app.post('/api/auth/register', async (req, res) => {
   }
   saveDB();
   const token = jwt.sign({ id }, JWT_SECRET, { expiresIn: '7d' });
-  res.json({ token, user: { id, username, email, avatarColor, tag, status: 'online', bio: '' } });
+  res.json({ token, user: { id, username, email, avatarColor, avatar: null, tag, status: 'online', bio: '', agreedToTerms: true } });
 });
 
 // ── Password Reset ──
@@ -320,7 +362,7 @@ app.post('/api/auth/reset/send-code', async (req, res) => {
   if (!user) return res.status(400).json({ error: 'No account with this email' });
   const code = genCode();
   resetCodes.set(email, { code, expiresAt: Date.now() + 10 * 60 * 1000 });
-  const sent = await sendEmail(email, 'Branch — Password Reset', `<h2>Password reset code</h2><p style="font-size:32px;font-weight:bold;letter-spacing:8px;color:#7c5cfc">${code}</p><p>Valid for 10 minutes. If you didn't request this, ignore this email.</p>`)
+  const sent = await sendEmail(email, 'Буст — Сброс пароля', `<h2>Password reset code</h2><p style="font-size:32px;font-weight:bold;letter-spacing:8px;color:#7c5cfc">${code}</p><p>Valid for 10 minutes. If you didn't request this, ignore this email.</p>`)
   console.log(`📧 Reset code for ${email}: ${code}`);
   const response = { ok: true, message: sent ? 'Code sent to email' : 'Check code below' };
   if (DEV_MODE) response.code = code;
@@ -348,22 +390,187 @@ app.post('/api/auth/login', async (req, res) => {
   if (!email || !password) return res.status(400).json({ error: 'All fields required' });
   const user = db.users.find(u => u.email === email);
   if (!user) return res.status(400).json({ error: 'Invalid credentials' });
+  if (user.deleted) return res.status(400).json({ error: 'Этот аккаунт был удалён' });
   const valid = await bcrypt.compare(password, user.passwordHash);
   if (!valid) return res.status(400).json({ error: 'Invalid credentials' });
 
   const token = jwt.sign({ id: user.id }, JWT_SECRET, { expiresIn: '7d' });
-  res.json({ token, user: { id: user.id, username: user.username, email: user.email, avatarColor: user.avatarColor, tag: user.tag || genTag(), status: user.status || 'online', bio: user.bio || '' } });
+  res.json({ token, user: { id: user.id, username: user.username, email: user.email, avatarColor: user.avatarColor, avatar: user.avatar || null, tag: user.tag || genTag(), status: user.status || 'online', bio: user.bio || '', bannerColor: user.bannerColor || null, agreedToTerms: !!user.agreedToTerms, statusEmoji: user.statusEmoji || null, avatarFrame: user.avatarFrame || null } });
 });
 
+// ── Premium ──
+
+app.get('/api/premium/plans', (req, res) => {
+  res.json(PREMIUM_PLANS);
+});
+
+app.get('/api/premium/status', auth, (req, res) => {
+  const u = req.user;
+  const active = isPremiumActive(u);
+  if (!active && u.premium) {
+    // Expired: revoke boosts
+    u.boostedServers.forEach(bs => {
+      const srv = db.servers.find(s => s.id === bs.serverId);
+      if (srv) { srv.boostCount = Math.max(0, (srv.boostCount || 0) - bs.amount); recalcBoostLevel(srv); }
+    });
+    u.boostedServers = [];
+    u.premium = null;
+    u.premiumExpiry = null;
+    u.boostCredits = 0;
+    saveDB();
+  }
+  res.json({
+    premium: active ? u.premium : null,
+    premiumExpiry: u.premiumExpiry,
+    boostCredits: active ? u.boostCredits : 0,
+    boostedServers: u.boostedServers || [],
+    statusEmoji: u.statusEmoji || null,
+    active,
+  });
+});
+
+app.post('/api/premium/activate', auth, (req, res) => {
+  const { tier } = req.body; // 'standard' | 'pro'
+  const plan = PREMIUM_PLANS[tier];
+  if (!plan) return res.status(400).json({ error: 'Invalid tier' });
+  const u = req.user;
+  const wasCredits = u.boostCredits || 0;
+  const newCredits = plan.boostCredits;
+  const diff = newCredits - wasCredits; // may be negative (downgrade)
+
+  // If downgrade and over-allocated, pull back excess boosts
+  if (diff < 0) {
+    let toRemove = Math.abs(diff);
+    const newBoosted = [];
+    for (const bs of (u.boostedServers || [])) {
+      if (toRemove <= 0) { newBoosted.push(bs); continue; }
+      const remove = Math.min(bs.amount, toRemove);
+      const srv = db.servers.find(s => s.id === bs.serverId);
+      if (srv) { srv.boostCount = Math.max(0, (srv.boostCount || 0) - remove); recalcBoostLevel(srv); }
+      toRemove -= remove;
+      if (bs.amount - remove > 0) newBoosted.push({ ...bs, amount: bs.amount - remove });
+    }
+    u.boostedServers = newBoosted;
+  }
+
+  u.premium = tier;
+  u.premiumExpiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(); // 30 days
+  u.boostCredits = newCredits;
+  saveDB();
+  res.json({ ok: true, premium: u.premium, premiumExpiry: u.premiumExpiry, boostCredits: u.boostCredits });
+});
+
+app.delete('/api/premium/cancel', auth, (req, res) => {
+  const u = req.user;
+  (u.boostedServers || []).forEach(bs => {
+    const srv = db.servers.find(s => s.id === bs.serverId);
+    if (srv) { srv.boostCount = Math.max(0, (srv.boostCount || 0) - bs.amount); recalcBoostLevel(srv); }
+  });
+  u.boostedServers = [];
+  u.premium = null;
+  u.premiumExpiry = null;
+  u.boostCredits = 0;
+  saveDB();
+  res.json({ ok: true });
+});
+
+// ── Boosts ──
+
+app.get('/api/boosts/my', auth, (req, res) => {
+  const u = req.user;
+  const used = (u.boostedServers || []).reduce((sum, b) => sum + b.amount, 0);
+  res.json({
+    total: u.boostCredits || 0,
+    used,
+    free: (u.boostCredits || 0) - used,
+    boostedServers: u.boostedServers || [],
+  });
+});
+
+app.post('/api/boosts/give', auth, (req, res) => {
+  const { serverId, amount } = req.body;
+  if (!serverId || !amount || amount < 1) return res.status(400).json({ error: 'Invalid params' });
+  const u = req.user;
+  if (!isPremiumActive(u)) return res.status(403).json({ error: 'Premium required' });
+  const used = (u.boostedServers || []).reduce((sum, b) => sum + b.amount, 0);
+  const free = (u.boostCredits || 0) - used;
+  if (amount > free) return res.status(400).json({ error: 'Not enough boost credits' });
+  const srv = db.servers.find(s => s.id === serverId);
+  if (!srv) return res.status(404).json({ error: 'Server not found' });
+  const existing = u.boostedServers.find(b => b.serverId === serverId);
+  if (existing) existing.amount += amount;
+  else u.boostedServers.push({ serverId, amount });
+  srv.boostCount = (srv.boostCount || 0) + amount;
+  recalcBoostLevel(srv);
+  saveDB();
+  io.emit('server-boost-updated', { serverId, boostCount: srv.boostCount, boostLevel: srv.boostLevel });
+  res.json({ ok: true, boostCount: srv.boostCount, boostLevel: srv.boostLevel });
+});
+
+app.post('/api/boosts/remove', auth, (req, res) => {
+  const { serverId, amount } = req.body;
+  if (!serverId || !amount || amount < 1) return res.status(400).json({ error: 'Invalid params' });
+  const u = req.user;
+  const existing = (u.boostedServers || []).find(b => b.serverId === serverId);
+  if (!existing || existing.amount < amount) return res.status(400).json({ error: 'Not enough boosts on this server' });
+  const srv = db.servers.find(s => s.id === serverId);
+  if (srv) { srv.boostCount = Math.max(0, (srv.boostCount || 0) - amount); recalcBoostLevel(srv); }
+  existing.amount -= amount;
+  if (existing.amount <= 0) u.boostedServers = u.boostedServers.filter(b => b.serverId !== serverId);
+  saveDB();
+  if (srv) io.emit('server-boost-updated', { serverId, boostCount: srv.boostCount, boostLevel: srv.boostLevel });
+  res.json({ ok: true });
+});
+
+// Status emoji
+app.patch('/api/premium/status-emoji', auth, (req, res) => {
+  const { emoji } = req.body;
+  if (!isPremiumActive(req.user)) return res.status(403).json({ error: 'Premium required' });
+  req.user.statusEmoji = emoji || null;
+  saveDB();
+  res.json({ ok: true, statusEmoji: req.user.statusEmoji });
+});
+
+// ── Auto-translate ──
+app.post('/api/translate', async (req, res) => {
+  const { texts, to, from = 'ru' } = req.body
+  if (!Array.isArray(texts) || !to) return res.status(400).json({ error: 'Missing params' })
+  const BATCH = 40
+  const results = []
+  try {
+    for (let i = 0; i < texts.length; i += BATCH) {
+      const chunk = texts.slice(i, i + BATCH)
+      const body = chunk.map(t => `q=${encodeURIComponent(t)}`).join('&')
+      const url = `https://translate.googleapis.com/translate_a/t?client=gtx&sl=${from}&tl=${to}&${body}`
+      const data = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } }).then(r => r.json())
+      const translated = Array.isArray(data) ? data.map(item => Array.isArray(item) ? item[0] : item) : chunk
+      results.push(...translated)
+    }
+    res.json({ translations: results })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
 app.get('/api/auth/me', auth, (req, res) => {
-  const { id, username, email, avatarColor, tag, status, bio } = req.user;
-  // Backfill tag for users registered before this feature
-  if (!req.user.tag) { req.user.tag = genTag(); saveDB(); }
-  res.json({ id, username, email, avatarColor, tag: req.user.tag, status: status || 'online', bio: bio || '' });
+  const u = req.user;
+  const { id, username, email, avatarColor, avatar, tag, status, bio, bannerColor, agreedToTerms } = u;
+  if (!u.tag) { u.tag = genTag(); saveDB(); }
+  // Auto-expire premium
+  if (u.premium && u.premiumExpiry && new Date(u.premiumExpiry) <= new Date()) {
+    (u.boostedServers || []).forEach(bs => {
+      const srv = db.servers.find(s => s.id === bs.serverId);
+      if (srv) { srv.boostCount = Math.max(0, (srv.boostCount || 0) - bs.amount); recalcBoostLevel(srv); }
+    });
+    u.boostedServers = []; u.premium = null; u.premiumExpiry = null; u.boostCredits = 0;
+    saveDB();
+  }
+  const active = isPremiumActive(u);
+  res.json({ id, username, email, avatarColor, avatar: avatar || null, tag: u.tag, status: status || 'online', bio: bio || '', bannerColor: bannerColor || null, agreedToTerms: !!agreedToTerms, premium: active ? u.premium : null, premiumExpiry: u.premiumExpiry || null, statusEmoji: u.statusEmoji || null, avatarFrame: u.avatarFrame || null });
 });
 
 app.patch('/api/auth/me', auth, (req, res) => {
-  const { username, status, bio } = req.body;
+  const { username, status, bio, bannerColor, statusEmoji } = req.body;
   const validStatuses = ['online', 'idle', 'dnd', 'invisible'];
   if (status && !validStatuses.includes(status)) return res.status(400).json({ error: 'Invalid status' });
   if (username !== undefined) {
@@ -373,12 +580,110 @@ app.patch('/api/auth/me', auth, (req, res) => {
     req.user.username = username;
   }
   if (status) req.user.status = status;
-  if (bio !== undefined) req.user.bio = bio.slice(0, 200);
+  const bioLimit = isPremiumActive(req.user) ? 500 : 200;
+  if (bio !== undefined) req.user.bio = bio.slice(0, bioLimit);
+  if (bannerColor !== undefined) req.user.bannerColor = bannerColor;
+  if (req.body.bannerImg !== undefined) {
+    if (!isPremiumActive(req.user)) return res.status(403).json({ error: 'Premium required' });
+    req.user.bannerImg = req.body.bannerImg || null;
+    io.emit('user-banner-changed', { userId: req.user.id, bannerImg: req.user.bannerImg });
+  }
+  if (statusEmoji !== undefined) {
+    if (!isPremiumActive(req.user)) return res.status(403).json({ error: 'Premium required' });
+    req.user.statusEmoji = statusEmoji || null;
+  }
+  const VALID_FRAMES = ['glow-purple','gold','fire','ice','galaxy','neon'];
+  if (req.body.avatarFrame !== undefined) {
+    if (!isPremiumActive(req.user)) return res.status(403).json({ error: 'Premium required' });
+    req.user.avatarFrame = VALID_FRAMES.includes(req.body.avatarFrame) ? req.body.avatarFrame : null;
+  }
   saveDB();
-  // Broadcast status change to all
+  // Broadcast changes to all
   if (status) io.emit('user-status-changed', { userId: req.user.id, status });
+  if (statusEmoji !== undefined) io.emit('user-status-emoji-changed', { userId: req.user.id, statusEmoji: req.user.statusEmoji });
+  if (req.body.avatarFrame !== undefined) io.emit('user-frame-changed', { userId: req.user.id, avatarFrame: req.user.avatarFrame });
   const u = req.user;
-  res.json({ id: u.id, username: u.username, email: u.email, avatarColor: u.avatarColor, tag: u.tag || genTag(), status: u.status, bio: u.bio || '' });
+  res.json({ id: u.id, username: u.username, email: u.email, avatarColor: u.avatarColor, avatar: u.avatar || null, tag: u.tag || genTag(), status: u.status, bio: u.bio || '', bannerColor: u.bannerColor || null, bannerImg: u.bannerImg || null, agreedToTerms: !!u.agreedToTerms, premium: isPremiumActive(u) ? u.premium : null, premiumExpiry: u.premiumExpiry || null, statusEmoji: u.statusEmoji || null, avatarFrame: u.avatarFrame || null });
+});
+
+// ── Avatar upload ──
+app.post('/api/auth/avatar', auth, upload.single('avatar'), (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No file' });
+  if (!req.file.mimetype.startsWith('image/')) return res.status(400).json({ error: 'Not an image' });
+  req.user.avatar = '/uploads/' + req.file.filename;
+  saveDB();
+  io.emit('user-avatar-changed', { userId: req.user.id, avatar: req.user.avatar });
+  res.json({ avatar: req.user.avatar });
+});
+
+app.delete('/api/auth/avatar', auth, (req, res) => {
+  req.user.avatar = null;
+  saveDB();
+  io.emit('user-avatar-changed', { userId: req.user.id, avatar: null });
+  res.json({ ok: true });
+});
+
+// ── Banner image ──
+app.post('/api/auth/banner', auth, upload.single('banner'), (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No file' });
+  if (!req.file.mimetype.startsWith('image/')) return res.status(400).json({ error: 'Not an image' });
+  req.user.bannerImg = '/uploads/' + req.file.filename;
+  saveDB();
+  io.emit('user-banner-changed', { userId: req.user.id, bannerImg: req.user.bannerImg });
+  res.json({ bannerImg: req.user.bannerImg });
+});
+
+app.delete('/api/auth/banner', auth, (req, res) => {
+  req.user.bannerImg = null;
+  saveDB();
+  io.emit('user-banner-changed', { userId: req.user.id, bannerImg: null });
+  res.json({ ok: true });
+});
+
+// ── Agree to terms ──
+app.post('/api/auth/agree-terms', auth, (req, res) => {
+  req.user.agreedToTerms = true;
+  req.user.agreedAt = new Date().toISOString();
+  saveDB();
+  res.json({ ok: true });
+});
+
+// ── Delete account ──
+app.delete('/api/auth/account', auth, (req, res) => {
+  const uid = req.user.id;
+  // Mark user as deleted (keep record for message history)
+  req.user.deleted = true;
+  req.user.deletedAt = new Date().toISOString();
+  req.user.username = 'Удалённый пользователь';
+  req.user.avatarColor = '#555';
+  req.user.email = `deleted_${uid}@deleted`;
+  req.user.passwordHash = '';
+  req.user.bio = '';
+  req.user.status = 'offline';
+  // Remove from all servers
+  db.members = db.members.filter(m => m.userId !== uid);
+  // Remove from friends
+  db.users.forEach(u => {
+    if (u.friends) u.friends = u.friends.filter(f => f !== uid);
+  });
+  // Remove friend requests
+  if (db.friendRequests) db.friendRequests = db.friendRequests.filter(r => r.fromId !== uid && r.toId !== uid);
+  // Hide all DM channels
+  db.dmChannels.forEach(dm => {
+    if (dm.participants.includes(uid)) {
+      if (!dm.hiddenFor) dm.hiddenFor = [];
+      if (!dm.hiddenFor.includes(uid)) dm.hiddenFor.push(uid);
+    }
+  });
+  saveDB();
+  // Disconnect all sockets for this user
+  const sockets = onlineUsers.get(uid);
+  if (sockets) {
+    sockets.forEach(sid => { io.sockets.sockets.get(sid)?.disconnect(true) });
+    onlineUsers.delete(uid);
+  }
+  io.emit('user-offline', { userId: uid });
+  res.json({ ok: true });
 });
 
 // ── Server Routes ──
@@ -421,7 +726,7 @@ app.post('/api/servers/:id/join', auth, (req, res) => {
       content: `${req.user.username} присоединился(-ась) к серверу`,
       type: 'system',
       createdAt: new Date().toISOString(),
-      user: { id: req.user.id, username: req.user.username, avatarColor: req.user.avatarColor, tag: req.user.tag || '0000' },
+      user: userMsg(req.user),
     };
     db.messages.push(sysMsg);
     io.to('channel:' + generalCh.id).emit('new-message', sysMsg);
@@ -443,7 +748,7 @@ app.delete('/api/servers/:id/leave', auth, (req, res) => {
       content: `${req.user.username} покинул(а) сервер`,
       type: 'system',
       createdAt: new Date().toISOString(),
-      user: { id: req.user.id, username: req.user.username, avatarColor: req.user.avatarColor, tag: req.user.tag || '0000' },
+      user: userMsg(req.user),
     };
     db.messages.push(sysMsg);
     io.to('channel:' + generalCh.id).emit('new-message', sysMsg);
@@ -461,8 +766,68 @@ app.put('/api/servers/:id', auth, (req, res) => {
   server.name = name;
   server.iconText = name.split(' ').map(w => w[0]).join('').toUpperCase().slice(0, 2);
   saveDB();
-  io.to('server:' + req.params.id).emit('server-updated', { id: server.id, name: server.name, iconText: server.iconText });
+  io.to('server:' + req.params.id).emit('server-updated', { id: server.id, name: server.name, iconText: server.iconText, avatar: server.avatar || null });
   res.json(server);
+});
+
+app.post('/api/servers/:id/avatar', auth, upload.single('avatar'), (req, res) => {
+  const server = db.servers.find(s => s.id === req.params.id);
+  if (!server) return res.status(404).json({ error: 'Server not found' });
+  if (server.ownerId !== req.user.id) return res.status(403).json({ error: 'Only the owner can change the avatar' });
+  if (!req.file) return res.status(400).json({ error: 'No file' });
+  if (!req.file.mimetype.startsWith('image/')) return res.status(400).json({ error: 'Not an image' });
+  server.avatar = '/uploads/' + req.file.filename;
+  saveDB();
+  io.to('server:' + req.params.id).emit('server-updated', { id: server.id, name: server.name, iconText: server.iconText, avatar: server.avatar });
+  res.json({ avatar: server.avatar });
+});
+
+app.delete('/api/servers/:id/avatar', auth, (req, res) => {
+  const server = db.servers.find(s => s.id === req.params.id);
+  if (!server) return res.status(404).json({ error: 'Server not found' });
+  if (server.ownerId !== req.user.id) return res.status(403).json({ error: 'Only the owner can change the avatar' });
+  server.avatar = null;
+  saveDB();
+  io.to('server:' + req.params.id).emit('server-updated', { id: server.id, name: server.name, iconText: server.iconText, avatar: null });
+  res.json({ ok: true });
+});
+
+// ── Server custom emojis ──
+app.get('/api/servers/:id/emojis', auth, (req, res) => {
+  const server = db.servers.find(s => s.id === req.params.id);
+  if (!server) return res.status(404).json({ error: 'Not found' });
+  res.json(server.customEmojis || []);
+});
+
+app.post('/api/servers/:id/emojis', auth, upload.single('image'), (req, res) => {
+  const server = db.servers.find(s => s.id === req.params.id);
+  if (!server) return res.status(404).json({ error: 'Not found' });
+  if (server.ownerId !== req.user.id) return res.status(403).json({ error: 'Only owner can manage emojis' });
+  // Check boost level — Level 1: 10 emojis, Level 2: 25, Level 3: 50
+  const limits = [0, 10, 25, 50];
+  const limit = limits[server.boostLevel || 0];
+  if (limit === 0) return res.status(403).json({ error: 'Server needs at least Boost Level 1 for custom emojis' });
+  if ((server.customEmojis || []).length >= limit) return res.status(400).json({ error: `Emoji limit reached (${limit} for Level ${server.boostLevel})` });
+  if (!req.file) return res.status(400).json({ error: 'No image' });
+  const { name } = req.body;
+  if (!name || !/^[a-zA-Z0-9_]{2,32}$/.test(name)) return res.status(400).json({ error: 'Emoji name must be 2-32 chars (letters, numbers, underscore)' });
+  if ((server.customEmojis || []).find(e => e.name === name)) return res.status(400).json({ error: 'Emoji name already used' });
+  const emoji = { id: 'em' + genId(), name, url: '/uploads/' + req.file.filename, addedBy: req.user.id, addedAt: new Date().toISOString() };
+  if (!server.customEmojis) server.customEmojis = [];
+  server.customEmojis.push(emoji);
+  saveDB();
+  io.to('server:' + server.id).emit('server-emojis-updated', { serverId: server.id, emojis: server.customEmojis });
+  res.json(emoji);
+});
+
+app.delete('/api/servers/:id/emojis/:emojiId', auth, (req, res) => {
+  const server = db.servers.find(s => s.id === req.params.id);
+  if (!server) return res.status(404).json({ error: 'Not found' });
+  if (server.ownerId !== req.user.id) return res.status(403).json({ error: 'Only owner can manage emojis' });
+  server.customEmojis = (server.customEmojis || []).filter(e => e.id !== req.params.emojiId);
+  saveDB();
+  io.to('server:' + server.id).emit('server-emojis-updated', { serverId: server.id, emojis: server.customEmojis });
+  res.json({ ok: true });
 });
 
 app.put('/api/channels/:id', auth, (req, res) => {
@@ -584,6 +949,7 @@ app.get('/api/servers/:id/members', auth, (req, res) => {
       id: u.id,
       username: u.username,
       avatarColor: u.avatarColor,
+      avatar: u.avatar || null,
       tag: u.tag || '0000',
       status: !onlineUsers.has(u.id) ? 'offline' : (u.status === 'invisible' ? 'offline' : (u.status || 'online')),
       role: server && server.ownerId === u.id ? 'owner' : (sm.role || 'user')
@@ -744,7 +1110,7 @@ app.get('/api/channels/:id/messages', auth, (req, res) => {
   // Attach user info
   const result = msgs.map(m => {
     const user = db.users.find(u => u.id === m.userId);
-    const obj = { ...m, hiddenFor: undefined, user: user ? { id: user.id, username: user.username, avatarColor: user.avatarColor, tag: user.tag || '0000' } : { id: m.userId, username: 'Deleted User', avatarColor: '#555', tag: '0000' } };
+    const obj = { ...m, hiddenFor: undefined, user: userMsg(user || { id: m.userId }) };
     if (m.replyToId) {
       const replyMsg = db.messages.find(r => r.id === m.replyToId);
       if (replyMsg) {
@@ -764,7 +1130,7 @@ app.get('/api/channels/:id/pinned', auth, (req, res) => {
   msgs.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   const result = msgs.map(m => {
     const user = db.users.find(u => u.id === m.userId);
-    return { ...m, hiddenFor: undefined, pinnedFor: undefined, user: user ? { id: user.id, username: user.username, avatarColor: user.avatarColor, tag: user.tag || '0000' } : { id: m.userId, username: 'Deleted User', avatarColor: '#555', tag: '0000' } };
+    return { ...m, hiddenFor: undefined, pinnedFor: undefined, user: userMsg(user || { id: m.userId }) };
   });
   res.json(result);
 });
@@ -778,7 +1144,7 @@ app.get('/api/dm-channels/:id/pinned', auth, (req, res) => {
   msgs.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   const result = msgs.map(m => {
     const user = db.users.find(u => u.id === m.userId);
-    return { ...m, hiddenFor: undefined, pinnedFor: undefined, user: user ? { id: user.id, username: user.username, avatarColor: user.avatarColor, tag: user.tag || '0000' } : { id: m.userId, username: 'Deleted User', avatarColor: '#555', tag: '0000' } };
+    return { ...m, hiddenFor: undefined, pinnedFor: undefined, user: userMsg(user || { id: m.userId }) };
   });
   res.json(result);
 });
@@ -797,7 +1163,11 @@ const onlineUsers = new Map(); // userId -> Set<socketId>
 
 // ── Friends Routes ──
 function userPublic(u) {
-  return { id: u.id, username: u.username, avatarColor: u.avatarColor, tag: u.tag || '0000', bio: u.bio || '', status: !onlineUsers.has(u.id) ? 'offline' : (u.status === 'invisible' ? 'offline' : (u.status || 'online')) };
+  return { id: u.id, username: u.username, avatarColor: u.avatarColor, avatar: u.avatar || null, tag: u.tag || '0000', bio: u.bio || '', bannerColor: u.bannerColor || null, status: !onlineUsers.has(u.id) ? 'offline' : (u.status === 'invisible' ? 'offline' : (u.status || 'online')) };
+}
+function userMsg(u) {
+  if (!u || !u.username) return { id: u?.id || '0', username: 'Deleted User', avatarColor: '#555', avatar: null, tag: '0000', statusEmoji: null, avatarFrame: null };
+  return { id: u.id, username: u.username, avatarColor: u.avatarColor, avatar: u.avatar || null, tag: u.tag || '0000', statusEmoji: u.statusEmoji || null, avatarFrame: u.avatarFrame || null };
 }
 
 app.post('/api/friends/search', auth, (req, res) => {
@@ -967,7 +1337,7 @@ app.post('/api/servers/:id/invite', auth, (req, res) => {
   };
   db.dmMessages.push(msg);
   saveDB();
-  const fullMsg = { ...msg, user: { id: req.user.id, username: req.user.username, avatarColor: req.user.avatarColor, tag: req.user.tag || '0000' } };
+  const fullMsg = { ...msg, user: userMsg(req.user) };
   io.to('dm:' + dm.id).emit('new-dm', fullMsg);
   // Make sure target is in the DM room
   const targetSockets = onlineUsers.get(targetUserId);
@@ -1005,7 +1375,7 @@ app.post('/api/channels/:id/voice-invite', auth, (req, res) => {
   };
   db.dmMessages.push(msg);
   saveDB();
-  const fullMsg = { ...msg, user: { id: req.user.id, username: req.user.username, avatarColor: req.user.avatarColor, tag: req.user.tag || '0000' } };
+  const fullMsg = { ...msg, user: userMsg(req.user) };
   io.to('dm:' + dm.id).emit('new-dm', fullMsg);
   const targetSockets = onlineUsers.get(targetUserId);
   if (targetSockets) {
@@ -1065,7 +1435,7 @@ app.get('/api/dm-channels/:id/messages', auth, (req, res) => {
   msgs = msgs.slice(-limit);
   const result = msgs.map(m => {
     const user = db.users.find(u => u.id === m.userId);
-    const obj = { ...m, hiddenFor: undefined, user: user ? { id: user.id, username: user.username, avatarColor: user.avatarColor, tag: user.tag || '0000' } : { id: m.userId, username: 'Deleted User', avatarColor: '#555', tag: '0000' } };
+    const obj = { ...m, hiddenFor: undefined, user: userMsg(user || { id: m.userId }) };
     if (m.replyToId) {
       const replyMsg = db.dmMessages.find(r => r.id === m.replyToId);
       if (replyMsg) {
@@ -1097,7 +1467,7 @@ app.get('/api/dm-search', auth, (req, res) => {
     if (nameMatch || matchedMsgs.length > 0) {
       results.push({
         dmId: dm.id,
-        partner: { id: partner.id, username: partner.username, avatarColor: partner.avatarColor, tag: partner.tag || '0000', status: partner.status || 'offline' },
+        partner: { ...userMsg(partner), status: partner.status || 'offline' },
         matchedMessages: matchedMsgs.map(m => {
           const u = db.users.find(u => u.id === m.userId);
           return { id: m.id, content: m.content, createdAt: m.createdAt, userId: m.userId, username: u ? u.username : 'Deleted User' };
@@ -1116,7 +1486,7 @@ app.put('/api/messages/:id', auth, (req, res) => {
   if (msg.userId !== req.user.id) return res.status(403).json({ error: 'Not your message' });
   const { content } = req.body;
   if (!content?.trim()) return res.status(400).json({ error: 'Content required' });
-  msg.content = content.trim();
+  msg.content = content.trim().slice(0, 1500);
   msg.editedAt = new Date().toISOString();
   saveDB();
   io.to('channel:' + msg.channelId).emit('message-edited', { id: msg.id, content: msg.content, editedAt: msg.editedAt });
@@ -1264,7 +1634,7 @@ app.post('/api/messages/:id/pin', auth, (req, res) => {
         id: 'm' + genId(), channelId: ch.id, userId: req.user.id,
         content: msg.pinned ? `${req.user.username} закрепил(а) сообщение` : `${req.user.username} открепил(а) сообщение`,
         type: 'system', createdAt: new Date().toISOString(),
-        user: { id: req.user.id, username: req.user.username, avatarColor: req.user.avatarColor, tag: req.user.tag || '0000' },
+        user: userMsg(req.user),
       };
       db.messages.push(sysMsg);
       saveDB();
@@ -1344,7 +1714,7 @@ app.put('/api/dm-messages/:id', auth, (req, res) => {
   if (msg.userId !== req.user.id) return res.status(403).json({ error: 'Not your message' });
   const { content } = req.body;
   if (!content?.trim()) return res.status(400).json({ error: 'Content required' });
-  msg.content = content.trim();
+  msg.content = content.trim().slice(0, 1500);
   msg.editedAt = new Date().toISOString();
   saveDB();
   io.to('dm:' + msg.dmChannelId).emit('dm-message-edited', { id: msg.id, content: msg.content, editedAt: msg.editedAt });
@@ -1373,6 +1743,21 @@ app.delete('/api/dm-messages/:id', auth, (req, res) => {
 });
 
 // Delete DM channel (for self or both)
+app.delete('/api/dm-channels/:id/messages', auth, (req, res) => {
+  const dm = db.dmChannels.find(d => d.id === req.params.id && d.participants.includes(req.user.id));
+  if (!dm) return res.status(404).json({ error: 'DM not found' });
+  const mode = req.query.mode;
+  if (mode === 'both') {
+    db.dmMessages = db.dmMessages.filter(m => m.dmChannelId !== dm.id);
+    io.to('dm:' + dm.id).emit('dm-messages-cleared', { dmChannelId: dm.id });
+  } else {
+    if (!dm.clearedAt) dm.clearedAt = {};
+    dm.clearedAt[req.user.id] = new Date().toISOString();
+  }
+  saveDB();
+  res.json({ ok: true });
+});
+
 app.delete('/api/dm-channels/:id', auth, (req, res) => {
   const dm = db.dmChannels.find(d => d.id === req.params.id && d.participants.includes(req.user.id));
   if (!dm) return res.status(404).json({ error: 'DM not found' });
@@ -1437,7 +1822,8 @@ app.get('/api/blocked-users', auth, (req, res) => {
 app.get('/api/users/:id/profile', auth, (req, res) => {
   const u = db.users.find(u => u.id === req.params.id);
   if (!u) return res.status(404).json({ error: 'User not found' });
-  res.json({ id: u.id, username: u.username, tag: u.tag, avatarColor: u.avatarColor, bio: u.bio || '', status: u.status || 'offline', createdAt: u.createdAt });
+  const realStatus = !onlineUsers.has(u.id) ? 'offline' : (u.status === 'invisible' ? 'offline' : (u.status || 'online'));
+  res.json({ id: u.id, username: u.username, tag: u.tag, avatarColor: u.avatarColor, avatar: u.avatar || null, bio: u.bio || '', bannerColor: u.bannerColor || null, status: realStatus, createdAt: u.createdAt });
 });
 
 app.get('/api/blocked-by/:id', auth, (req, res) => {
@@ -1451,18 +1837,20 @@ app.get('/api/blocked-users-details', auth, (req, res) => {
   const ids = u?.blockedUsers || [];
   const details = ids.map(id => {
     const bu = db.users.find(x => x.id === id);
-    return bu ? { id: bu.id, username: bu.username, tag: bu.tag, avatarColor: bu.avatarColor } : null;
+    return bu ? { id: bu.id, username: bu.username, tag: bu.tag, avatarColor: bu.avatarColor, avatar: bu.avatar || null } : null;
   }).filter(Boolean);
   res.json(details);
 });
 
 // ── Voice state tracking ──
 const voiceState = new Map(); // channelId -> Map<userId, { socketId, username, avatarColor, tag, camera, screen }>
+const dmCallState = new Map(); // dmChannelId -> { callerId, participants: Map<userId, { socketId, username, avatarColor, tag }>, startedAt, timeout }
+
 
 function getVoiceUsers(channelId) {
   const map = voiceState.get(channelId);
   if (!map) return [];
-  return [...map.values()].map(v => ({ id: v.userId, username: v.username, avatarColor: v.avatarColor, tag: v.tag, socketId: v.socketId, camera: v.camera || false, screen: v.screen || false, muted: v.muted || false, deafened: v.deafened || false }));
+  return [...map.values()].map(v => ({ id: v.userId, username: v.username, avatarColor: v.avatarColor, avatar: v.avatar || null, tag: v.tag, socketId: v.socketId, camera: v.camera || false, screen: v.screen || false, muted: v.muted || false, deafened: v.deafened || false }));
 }
 
 // API to get voice state for a server's channels
@@ -1484,7 +1872,7 @@ io.use((socket, next) => {
     const user = db.users.find(u => u.id === decoded.id);
     if (!user) return next(new Error('User not found'));
     socket.userId = user.id;
-    socket.userData = { id: user.id, username: user.username, avatarColor: user.avatarColor, tag: user.tag || '0000' };
+    socket.userData = { id: user.id, username: user.username, avatarColor: user.avatarColor, avatar: user.avatar || null, tag: user.tag || '0000' };
     next();
   } catch {
     next(new Error('Invalid token'));
@@ -1569,7 +1957,7 @@ io.on('connection', (socket) => {
       }
     }
 
-    const text = (content || '').trim().slice(0, 200);
+    const text = (content || '').trim().slice(0, 1500);
     if (!text && !attachment) return;
     const id = 'm' + genId();
     const msg = {
@@ -1595,7 +1983,7 @@ io.on('connection', (socket) => {
     io.to('channel:' + channelId).emit('new-message', fullMsg);
     // Notify all server members for unread tracking
     if (channel.serverId) {
-      io.to('server:' + channel.serverId).emit('channel-message-notify', { channelId, serverId: channel.serverId, userId: uid, username: socket.userData?.username, avatarColor: socket.userData?.avatarColor, content: text, attachment: !!attachment });
+      io.to('server:' + channel.serverId).emit('channel-message-notify', { channelId, serverId: channel.serverId, userId: uid, username: socket.userData?.username, avatarColor: socket.userData?.avatarColor, avatar: socket.userData?.avatar, content: text, attachment: !!attachment });
     }
   });
 
@@ -1610,7 +1998,7 @@ io.on('connection', (socket) => {
     if (sender?.blockedUsers?.includes(partnerId) || partner?.blockedUsers?.includes(uid)) return;
     // Unhide DM channel for both participants when new message is sent
     if (dm.hiddenFor) dm.hiddenFor = dm.hiddenFor.filter(id => id !== uid);
-    const text = (content || '').trim().slice(0, 200);
+    const text = (content || '').trim().slice(0, 1500);
     if (!text && !attachment) return;
     const id = 'dm' + genId();
     const msg = { id, dmChannelId, userId: uid, content: text, createdAt: new Date().toISOString() };
@@ -1654,7 +2042,7 @@ io.on('connection', (socket) => {
 
     // Join new voice channel
     if (!voiceState.has(channelId)) voiceState.set(channelId, new Map());
-    voiceState.get(channelId).set(uid, { userId: uid, socketId: socket.id, username: socket.userData.username, avatarColor: socket.userData.avatarColor, tag: socket.userData.tag });
+    voiceState.get(channelId).set(uid, { userId: uid, socketId: socket.id, username: socket.userData.username, avatarColor: socket.userData.avatarColor, avatar: socket.userData.avatar, tag: socket.userData.tag });
     socket.join('voice:' + channelId);
     io.to('server:' + channel.serverId).emit('voice-state-update', { channelId, users: getVoiceUsers(channelId) });
     // Sound notification for others in the channel
@@ -1743,7 +2131,143 @@ io.on('connection', (socket) => {
     io.to(targetSocketId).emit('voice-ice-candidate', { fromSocketId: socket.id, candidate });
   });
 
+  // ── DM Call events ──
+  socket.on('dm-call-start', ({ dmChannelId }) => {
+    if (!dmChannelId) return;
+    const dm = db.dmChannels.find(d => d.id === dmChannelId && d.participants.includes(uid));
+    if (!dm) return;
+    if (dmCallState.has(dmChannelId)) return; // call already active
+    const partnerId = dm.participants.find(p => p !== uid);
+    const partner = db.users.find(u => u.id === partnerId);
+    if (!partner) return;
+    // Block check
+    const sender = db.users.find(u => u.id === uid);
+    if (sender?.blockedUsers?.includes(partnerId) || partner?.blockedUsers?.includes(uid)) return;
+    // Leave any server voice channel first
+    for (const [chId, users] of voiceState) {
+      if (users.has(uid)) {
+        users.delete(uid);
+        if (users.size === 0) voiceState.delete(chId);
+        const ch = db.channels.find(c => c.id === chId);
+        if (ch) io.to('server:' + ch.serverId).emit('voice-state-update', { channelId: chId, users: getVoiceUsers(chId) });
+      }
+    }
+    // Create call state
+    const participants = new Map();
+    participants.set(uid, { socketId: socket.id, username: socket.userData.username, avatarColor: socket.userData.avatarColor, avatar: socket.userData.avatar, tag: socket.userData.tag });
+    const timeout = setTimeout(() => {
+      // No answer after 30s
+      if (dmCallState.has(dmChannelId)) {
+        const call = dmCallState.get(dmChannelId);
+        dmCallState.delete(dmChannelId);
+        for (const [pId, p] of call.participants) {
+          io.to(p.socketId).emit('dm-call-ended', { dmChannelId, reason: 'no-answer' });
+        }
+        // Also notify partner
+        const partnerSockets = onlineUsers.get(partnerId);
+        if (partnerSockets) partnerSockets.forEach(sid => io.to(sid).emit('dm-call-ended', { dmChannelId, reason: 'no-answer' }));
+        // System message
+        const msgId = 'dm' + genId();
+        const sysMsg = { id: msgId, dmChannelId, userId: uid, content: '', type: 'dm-call-missed', createdAt: new Date().toISOString() };
+        db.dmMessages.push(sysMsg);
+        saveDB();
+        io.to('dm:' + dmChannelId).emit('new-dm', { ...sysMsg, user: socket.userData });
+      }
+    }, 30000);
+    dmCallState.set(dmChannelId, { callerId: uid, participants, startedAt: null, timeout });
+    // Notify partner
+    const partnerSockets = onlineUsers.get(partnerId);
+    if (partnerSockets) {
+      partnerSockets.forEach(sid => {
+        io.to(sid).emit('dm-call-incoming', { dmChannelId, caller: { id: uid, username: socket.userData.username, avatarColor: socket.userData.avatarColor, avatar: socket.userData.avatar, tag: socket.userData.tag } });
+      });
+    }
+  });
+
+  socket.on('dm-call-accept', ({ dmChannelId }) => {
+    if (!dmChannelId) return;
+    const call = dmCallState.get(dmChannelId);
+    if (!call) return;
+    if (call.callerId === uid) return; // caller can't accept own call
+    const dm = db.dmChannels.find(d => d.id === dmChannelId && d.participants.includes(uid));
+    if (!dm) return;
+    // Leave any server voice channel
+    for (const [chId, users] of voiceState) {
+      if (users.has(uid)) {
+        users.delete(uid);
+        if (users.size === 0) voiceState.delete(chId);
+        const ch = db.channels.find(c => c.id === chId);
+        if (ch) io.to('server:' + ch.serverId).emit('voice-state-update', { channelId: chId, users: getVoiceUsers(chId) });
+      }
+    }
+    // Clear no-answer timeout
+    if (call.timeout) clearTimeout(call.timeout);
+    call.timeout = null;
+    call.startedAt = new Date();
+    // Add callee to participants
+    call.participants.set(uid, { socketId: socket.id, username: socket.userData.username, avatarColor: socket.userData.avatarColor, avatar: socket.userData.avatar, tag: socket.userData.tag });
+    // Notify both sides with peer info for WebRTC
+    for (const [pId, p] of call.participants) {
+      const peers = [];
+      for (const [otherId, other] of call.participants) {
+        if (otherId !== pId) peers.push({ id: otherId, socketId: other.socketId, username: other.username, avatarColor: other.avatarColor, avatar: other.avatar, tag: other.tag });
+      }
+      io.to(p.socketId).emit('dm-call-accepted', { dmChannelId, peers });
+    }
+  });
+
+  socket.on('dm-call-reject', ({ dmChannelId }) => {
+    if (!dmChannelId) return;
+    const call = dmCallState.get(dmChannelId);
+    if (!call) return;
+    if (call.timeout) clearTimeout(call.timeout);
+    dmCallState.delete(dmChannelId);
+    // Notify all participants
+    for (const [pId, p] of call.participants) {
+      io.to(p.socketId).emit('dm-call-ended', { dmChannelId, reason: 'rejected' });
+    }
+  });
+
+  socket.on('dm-call-end', ({ dmChannelId }) => {
+    if (!dmChannelId) return;
+    const call = dmCallState.get(dmChannelId);
+    if (!call) return;
+    if (call.timeout) clearTimeout(call.timeout);
+    const duration = call.startedAt ? Math.round((Date.now() - call.startedAt.getTime()) / 1000) : 0;
+    dmCallState.delete(dmChannelId);
+    // Notify all participants
+    for (const [pId, p] of call.participants) {
+      io.to(p.socketId).emit('dm-call-ended', { dmChannelId, reason: 'ended', duration });
+    }
+    // System message: call ended
+    const msgId = 'dm' + genId();
+    const mins = Math.floor(duration / 60);
+    const secs = duration % 60;
+    const durationStr = mins > 0 ? `${mins} мин. ${secs} сек.` : `${secs} сек.`;
+    const sysMsg = { id: msgId, dmChannelId, userId: uid, content: durationStr, type: 'dm-call-end', createdAt: new Date().toISOString() };
+    db.dmMessages.push(sysMsg);
+    saveDB();
+    io.to('dm:' + dmChannelId).emit('new-dm', { ...sysMsg, user: socket.userData });
+  });
+
   socket.on('disconnect', () => {
+    // Delay DM call cleanup
+    setTimeout(() => {
+      const currentSockets = onlineUsers.get(uid);
+      if (currentSockets && currentSockets.size > 0) return;
+      for (const [dmChId, call] of dmCallState) {
+        if (call.participants.has(uid)) {
+          if (call.timeout) clearTimeout(call.timeout);
+          const duration = call.startedAt ? Math.round((Date.now() - call.startedAt.getTime()) / 1000) : 0;
+          dmCallState.delete(dmChId);
+          for (const [pId, p] of call.participants) {
+            if (pId !== uid) io.to(p.socketId).emit('dm-call-ended', { dmChannelId: dmChId, reason: 'disconnected', duration });
+          }
+          break;
+        }
+      }
+    }, 15000);
+
     // Delay voice cleanup to allow reconnection (15 seconds grace period)
     setTimeout(() => {
       // Check if user reconnected (has a new socket in onlineUsers)
@@ -1778,6 +2302,10 @@ io.on('connection', (socket) => {
   });
 });
 
+// Static legal pages
+app.get('/terms', (req, res) => { const f = join(__dirname, 'dist', 'terms.html'); existsSync(f) ? res.sendFile(f) : res.status(404).send('Not found') });
+app.get('/privacy', (req, res) => { const f = join(__dirname, 'dist', 'privacy.html'); existsSync(f) ? res.sendFile(f) : res.status(404).send('Not found') });
+
 // SPA fallback — serve index.html for non-API routes
 if (existsSync(join(__dirname, 'dist', 'index.html'))) {
   app.get('*', (req, res) => {
@@ -1788,5 +2316,5 @@ if (existsSync(join(__dirname, 'dist', 'index.html'))) {
 // ── Start ──
 const PORT = process.env.PORT || 3001;
 httpServer.listen(PORT, () => {
-  console.log(`Branch running on http://localhost:${PORT}`);
+  console.log(`Буст running on http://localhost:${PORT}`);
 });
